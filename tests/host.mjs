@@ -135,9 +135,9 @@ console.log('the cross-origin bridge appended to the served animation')
 
   check('the asset on disk is untouched (43140 bytes, byte-identical to the deliverable)',
     Buffer.byteLength(asset) === 43140)
-  check('the served document is larger than the asset by the bridge only',
-    Buffer.byteLength(served) - Buffer.byteLength(asset) < 2200, Buffer.byteLength(served) - Buffer.byteLength(asset))
-  check('the animation body is served verbatim before the bridge',
+  check('the served document adds the bridge and identity adaptation',
+    served.includes("get v() { return 'ID CONFIRMED : '") && served.includes('850 / (el.statusText.offsetWidth'))
+  check('the original animation prefix is preserved',
     served.indexOf(asset.slice(0, 4000)) === 0)
   check('the bridge sits immediately before </body>',
     /<\/script><script>\(function\(\)\{try\{function post/.test(served) || served.indexOf('dsh-opening-splash') < served.lastIndexOf('</body>'))
@@ -266,6 +266,16 @@ console.log('generated scripts must PARSE, not merely contain the right words')
   check('the bridge reports the animation duration', posted.some((p) => p.type === 'ready' && p.duration === 20250), posted)
   check('the bridge beacons its own readiness to the host', beacons.some((u) => u.includes('stage=bridge') && u.includes('bridge-ready')), beacons)
   check('the bridge beacon carries the token', beacons.some((u) => u.includes('k=tok-abc')), beacons)
+
+  const identity = { source: 'dsh-opening-parent', type: 'identity', k: 'tok-abc', label: 'Alice <script>\u0000' }
+  for (const fn of listeners.window.message || []) fn({ source: {}, data: identity })
+  check('identity from a different window is ignored', win.__DSH_OPENING_IDENTITY__ === undefined)
+  for (const fn of listeners.window.message || []) fn({ source: win.parent, data: { ...identity, k: 'wrong' } })
+  check('identity with the wrong token is ignored', win.__DSH_OPENING_IDENTITY__ === undefined)
+  for (const fn of listeners.window.message || []) fn({ source: win.parent, data: identity })
+  check('authenticated identity stays plain text and strips control characters', win.__DSH_OPENING_IDENTITY__ === 'Alice <script> ')
+  for (const fn of listeners.window.message || []) fn({ source: win.parent, data: { ...identity, label: null } })
+  check('clearing identity removes the previous name', win.__DSH_OPENING_IDENTITY__ === null)
 
   /* The completion path, driven through the listener the bridge registered. */
   for (const fn of listeners.window['dsh:splash-complete'] || []) fn({ detail: { reason: 'completed' } })

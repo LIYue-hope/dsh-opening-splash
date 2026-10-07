@@ -50,6 +50,7 @@
      avoids depending on WindowProxy identity, which is not guaranteed to
      compare equal across origins. */
   var messageToken = ''
+  var identityLabel = window.__DSH_OPENING_IDENTITY__ || null
   var pollTimer = 0
   var capTimer = 0
   var capDeadline = 0
@@ -348,6 +349,7 @@
       if (!messageToken || data.k !== messageToken) return
 
       if (data.type === 'ready') {
+        sendIdentity()
         frameReady = true
         if (Number(data.duration) > 0) frameDuration = Number(data.duration)
         log('animation reported ready', data.duration)
@@ -362,6 +364,15 @@
         skip(data.how === 'click' ? 'click' : 'key')
       }
     })
+  }
+
+  function sendIdentity() {
+    try {
+      if (frame && frame.contentWindow) frame.contentWindow.postMessage({
+        source: 'dsh-opening-parent', type: 'identity', k: messageToken,
+        label: identityLabel
+      }, new URL(frame.src, location.href).origin)
+    } catch (err) { /* An unavailable account must not interrupt playback. */ }
   }
 
   /* Same-origin extras, used when the frame is reachable: skipping from inside
@@ -462,6 +473,7 @@
      read of `contentWindow` -- is what the splash's lifetime is anchored to. */
   function onFrameLoad() {
     if (finished) return
+    sendIdentity()
     if (frameIsDone()) { armFrame(0, 'load'); finish('completed', 'same-origin'); return }
     armFrame(0, frameReady ? 'message' : 'load')
   }
@@ -510,6 +522,10 @@
      `play` is intentionally unconditional -- an explicit replay must not be
      refused by `oncePerSession` or `cooldownMs`. */
   window.DSHOpening = {
+    setIdentity: function (label) {
+      identityLabel = typeof label === 'string' ? label : null
+      sendIdentity()
+    },
     play: function () { if (!finished) return false; finished = false; detach = []; start(true); return true },
     skip: function () { skip('api') },
     isPlaying: function () { return !finished },

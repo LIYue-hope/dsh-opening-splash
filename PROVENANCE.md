@@ -9,7 +9,7 @@
 | `deepseek-harness-opening.html`（工作区交付物） | 43140 | `8e3d7a40b93ead5ff37668835ae1d5a2` |
 | `assets/splash.html`（插件内） | 43140 | `8e3d7a40b93ead5ff37668835ae1d5a2` |
 
-磁盘中的动画保持原样；宿主在响应时添加 bridge，以便控制倍速、跳过和结束通知。iframe 在桌面端可能跨源。替换 `assets/splash.html` 时还需同步更新 `lib/index.js` 的 `ANIMATION_DURATION_MS`，确保无消息时的兜底计时准确。
+磁盘中的动画保持原样；宿主在响应时添加 bridge，以便控制倍速、跳过、账号名称消息和结束通知，并将身份文字替换为动态读取、加入长名称宽度适配。iframe 在桌面端可能跨源。替换 `assets/splash.html` 时还需同步更新 `lib/index.js` 的 `ANIMATION_DURATION_MS`，确保无消息时的兜底计时准确。
 
 ## 它是什么
 

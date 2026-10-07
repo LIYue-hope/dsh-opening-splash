@@ -4,17 +4,27 @@
 
 插件使用 Node.js 内置模块，没有运行时依赖。支持浏览器页面和官方 Electron 桌面端的两种 index 注入通道。
 
+从 1.0.2 起，动画中的 `ID CONFIRMED : DEEPSEEK` 支持自动显示 DSH 的登录账号名称，详见下方“账号名称”。
+
 ## 安装
 
-需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。此前在桌面端 0.2.0-rc.2 确认过播放。
+需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。账号名称功能还需要客户端模块系统、`remote.account` 和 `locale` 服务。此前在桌面端 0.2.0-rc.2 确认过播放；1.0.2 通过离线回归测试，尚未验证此次修改的实际桌面端画面。
 
-在deepseek harness的插件市场中选择npm官方源或中国大陆镜像源后输入dsh-opening-splash即可直接安装；
+在 DeepSeek Harness 的插件市场中选择 npm 官方源或中国大陆镜像源，输入 `dsh-opening-splash` 即可安装。已安装用户请更新到 1.0.2，然后重启 DSH。
 
 从 npm 安装到 Windows 桌面 profile：
 
 ```powershell
 dsh plugin --profile desktop add dsh-opening-splash
 ```
+
+镜像尚未同步时，可直接从 npm 官方 tarball 安装 1.0.2：
+
+```powershell
+dsh plugin --profile desktop add https://registry.npmjs.org/dsh-opening-splash/-/dsh-opening-splash-1.0.2.tgz
+```
+
+直装地址：[dsh-opening-splash-1.0.2.tgz](https://registry.npmjs.org/dsh-opening-splash/-/dsh-opening-splash-1.0.2.tgz)。
 
 离线或开发时，下载或克隆仓库后，将插件目录安装到实际使用的 profile：
 
@@ -24,6 +34,23 @@ dsh plugin --profile desktop list
 ```
 
 安装后重启 DeepSeek Harness 并刷新页面。本地路径必须指向含 `package.json` 的插件目录。其他 profile 请替换 `desktop`。
+
+## 账号名称
+
+插件通过已认证的客户端 `ctx.remote.account.getProfile()` 获取资料，仅替换 `ID CONFIRMED` 后的身份文字，DeepSeek 品牌标识保持原样。
+
+| 账号情况 | 显示文字 |
+|---|---|
+| 已登录且有资料名 | `ID CONFIRMED : <name>` |
+| 资料名为 `null`，有联系方式 | `ID CONFIRMED : <脱敏 contact>` |
+| 已登录，但资料查询失败或名称与联系方式均为 `null` | 中文“已登录”或英文 `Signed in` |
+| 未登录、仅使用 API Key、账号服务尚未就绪或资料结果为 `null` | `ID CONFIRMED : DEEPSEEK` |
+
+账号状态流会清除切换账号后的旧资料；退出登录和会话过期也会清除旧名称，迟到的查询响应不会恢复旧名称。查询异步进行，不延迟动画播放，因此资料返回过晚时，本次动画仍可能显示默认文字。
+
+用户名作为普通文字传给动画 iframe，不写入 URL、诊断上报或公开资源响应。支持中文并保留名称大小写；控制字符会转换为空格，最多显示 80 个 Unicode 码点，长文字会横向缩放以适应画面。没有新增自定义称呼配置项。
+
+该接入参照桌面端 0.2.0-rc.2 的客户端注册与 RPC 协议。离线测试覆盖名称降级、账号切换与过期清理、迟到响应、消息来源和令牌校验；DOM 桩测试不能替代实际桌面端视觉验收。
 
 ## 配置
 
