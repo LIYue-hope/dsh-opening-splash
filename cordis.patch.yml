@@ -1,0 +1,30 @@
+# ============================================================================
+# dsh-opening-splash —— DSH bundle patch
+# ============================================================================
+# 这是插件的"挂载声明"。DSH 启动时按 bundle 层栈叠加各插件 patch, 本文件把开场
+# 动画插件插入 profile 的配置树。
+#
+# 安装 (二选一):
+#   dsh plugin add dsh-opening-splash                  # 从 npm 装已发布版
+#   dsh plugin add link:D:\path\to\dsh-opening-splash   # 本地目录 (开发/离线)
+#
+# 下面的 config 全是可选的; 删掉任意一行就回到该字段的默认值,
+# 整段 config 删掉则全部使用默认值。字段含义见 README.md 的「配置」一节。
+# ============================================================================
+
+- insert:
+    - id: dsh-opening-splash
+      name: dsh-opening-splash
+      config:
+        # 总开关。false = 完全不注入任何脚本, 等同于没装这个插件。
+        enabled: true
+        # 播放倍速。1 = 按原始时长 (约 20.25 s) 完整播放; 2 = 一半时长。
+        speed: 1
+        # true = 每个浏览器会话只播一次 (同一标签页刷新不再播); false = 每次打开页面都播。
+        oncePerSession: false
+        # 允许按 Esc 提前结束。默认整段播完; 这里的 true 只是保留一条"故意退出"的路。
+        skippable: true
+        # 点击画面是否也算跳过。默认 false —— 启动瞬间的误点不该把开场动画打断。
+        skipOnClick: false
+        # 右下角那行 "Esc 跳过" 提示。默认 false, 放映保持干净。
+        showSkipHint: false

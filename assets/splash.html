@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DeepSeek Harness  - Opening</title>
+<style>
+  /* ------------------------------------------------------------------
+     DeepSeek Harness - software opening animation
+
+     Recreated from the 7s-26s intro of the Arknights special video
+     "Rhine Lab: Access".  Substitutions:
+       Rhine Lab mark  -> DeepSeek whale
+       RHINE LAB       -> DEEPSEEK
+       RHINE LAB.LLC.  -> DEEPSEEK HARNESS
+       POWERED BY ...  -> POWERED BY DEEPSEEK HARNESS
+
+     This file is UTF-8 WITHOUT a BOM and contains no non-ASCII characters,
+     so no editor or shell can mangle it into mojibake.
+     ------------------------------------------------------------------ */
+  :root {
+    --paper:      #e6e4e0;   /* sampled from the reference frames */
+    --paper-hi:   #efeeea;
+    --paper-lo:   #d8d5d0;
+    --ink:        #141414;
+    --ink-soft:   #6f6b66;
+    --ink-faint:  #b3b0aa;
+    --accent:     #fe5f2e;   /* small warm dots on the radar plate */
+    --ds-blue:    #4d6bfe;   /* official DeepSeek blue, used on the final lockup */
+
+    --sans: "Segoe UI", "Helvetica Neue", Arial, "Microsoft YaHei", sans-serif;
+    --mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: #0b0b0b;
+    overflow: hidden;
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Fill the window; the stage itself is a fixed 16:9 canvas that is scaled to fit. */
+  #splash {
+    position: fixed; inset: 0;
+    display: grid; place-items: center;
+    background: #0b0b0b;
+    cursor: default;
+  }
+
+  #stage {
+    position: absolute; left: 50%; top: 50%;
+    width: 1920px; height: 1080px;
+    transform-origin: center center;
+    background:
+      radial-gradient(115% 95% at 46% 34%, var(--paper-hi) 0%, var(--paper) 46%, var(--paper-lo) 100%);
+    overflow: hidden;
+    color: var(--ink);
+  }
+
+  /* faint photographic backdrop: out-of-focus lab glassware, as in the reference */
+  #ghost {
+    position: absolute; inset: 0;
+    opacity: 0;
+    background-repeat: no-repeat;
+    background-size: cover; filter: blur(65px);
+    mix-blend-mode: multiply;
+    pointer-events: none;
+  }
+  /* Pale scientific backdrop, below all foreground UI. */
+  #dnaBackdrop { position: absolute; inset: 0; pointer-events: none; opacity: 0; }
+  .dna-column { position: absolute; top: -540px; width: 360px; height: 2160px; }
+  #dnaLeft { left: 100px; transform: rotate(25deg); transform-origin: 50% 50%; }
+  #dnaRight { left: 1470px; }
+  .dna-column svg { width: 360px; height: 3240px; overflow: visible; }
+  /* 60% paper (#e6e4e0), 40% white: slightly closer to the paper. */
+  .dna-strand { fill: none; stroke: #f0efec; stroke-width: 6; }
+  .dna-rung { stroke: #f0efec; stroke-width: 3.6; stroke-linecap: round; }
+
+  /* subtle film grain / paper tooth */
+  #stage::after {
+    content: "";
+    position: absolute; inset: -40px;
+    pointer-events: none;
+    opacity: .12;
+    background-image: url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'>\
+<filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/>\
+<feColorMatrix type='saturate' values='0'/></filter>\
+<rect width='240' height='240' filter='url(%23n)' opacity='.55'/></svg>");
+    mix-blend-mode: multiply;
+  }
+
+  #vignette {
+    position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(120% 100% at 50% 45%, rgba(0,0,0,0) 55%, rgba(0,0,0,.10) 100%);
+  }
+
+  /* ---------------- top-left identification block ---------------- */
+  #hud {
+    position: absolute; left: 40px; top: 42px;
+    width: 420px;
+    opacity: 0;
+  }
+  #hud .line1 {
+    font-size: 35.64px; font-weight: 800; letter-spacing: .085em;
+    line-height: 1; text-transform: uppercase;
+  }
+  #hud .line2 {
+    margin-top: 5px;
+    font-size: 16.74px; font-weight: 500; letter-spacing: .075em;
+    text-transform: uppercase; color: #23211f;
+  }
+  #hud .line3 {
+    margin-top: 7px;
+    font-size: 31.32px; font-weight: 400; letter-spacing: .045em;
+    line-height: 1; text-transform: uppercase;
+  }
+  #hud .line3 b { font-weight: 800; letter-spacing: .01em; }
+
+  /* a scan bar sweeps across the identification block as the name is "read" */
+  #hudScan {
+    position: absolute; left: 0; top: -3px; width: 74px; height: 86px;
+    pointer-events: none; opacity: 0;
+    background: linear-gradient(90deg, rgba(20,20,20,0) 0%, rgba(20,20,20,.13) 55%, rgba(20,20,20,0) 100%);
+  }
+
+  /* ---------------- bottom-right credit ---------------- */
+  #footer {
+    position: absolute; right: 38px; bottom: 34px;
+    display: flex; align-items: center; gap: 12px;
+    opacity: 0;
+  }
+  #footer .txt {
+    font-size: 15.12px; font-weight: 600; letter-spacing: .11em;
+    text-transform: uppercase; color: #1c1a19;
+  }
+  #footer .rule { width: 26px; height: 3px; background: #1c1a19; }
+
+  /* ---------------- centred access read-out ---------------- */
+  #access {
+    position: absolute; left: 0; right: 0; top: 500px;
+    text-align: center;
+    font-size: 15.12px; font-weight: 500; letter-spacing: .30em;
+    text-transform: uppercase; color: #2a2826;
+    opacity: 0;
+  }
+
+  /* ---------------- the mark (whale) + wordmark ---------------- */
+  #markWrap {
+    position: absolute; left: 0; right: 0; top: 398px;
+    display: flex; flex-direction: column; align-items: center;
+    opacity: 0;
+  }
+  #whale { width: 298px; height: auto; display: block; overflow: visible; }
+  #whale .fillBody { fill: var(--ink); }
+  #whale .draw      { fill: none; stroke: var(--ink); stroke-width: .65; stroke-linejoin: round; stroke-linecap: round; }
+
+  #wordmark {
+    margin-top: 26px;
+    font-size: 20.52px; font-weight: 500;
+    letter-spacing: .42em; text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  /* ---------------- status read-out beside the mark ---------------- */
+  #status {
+    position: absolute; left: 930px; top: 536px;
+    font-size: 17.28px; font-weight: 500; letter-spacing: .14em;
+    text-transform: uppercase; opacity: 0;
+    white-space: nowrap;
+  }
+  #status .tick {
+    position: absolute; left: -22px; top: 4px;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--ink);
+  }
+  #scanbar {
+    position: absolute; left: 0; top: 26px; width: 210px; height: 2px;
+    background: #c8c5c0; overflow: hidden;
+  }
+  #scanbar i { position: absolute; inset: 0; width: 0%; background: var(--ink); display: block; }
+
+  /* ---------------- radar / authorization plate ---------------- */
+  /* Explicit box centred on the stage: 960-350 = 610, 540-350 = 190.
+     No grid centring, so the disc cannot drift out of place. */
+  #radar {
+    position: absolute; left: 610px; top: 190px;
+    width: 700px; height: 700px;
+    opacity: 0;
+  }
+  #radar svg { width: 700px; height: 700px; overflow: visible; }
+  /* 1 viewBox unit = 1 css px, so these stroke widths are measured pixels */
+  #radar .paperDisc { fill: #ebebe7; stroke: none; }
+  /* measured strokes: the black rings are ~2.2 px, the white ring is a wide soft band */
+  #radar .arc      { fill: none; stroke: #16150f; stroke-width: 2.2; stroke-linecap: round; }
+  #radar .arc.thin { stroke-width: 1.8; }
+  #radar .glowArc  { fill: none; stroke: #ffffff; stroke-width: 7; stroke-linecap: butt; opacity: .95; }
+  #radar .iris     { fill: none; stroke: #16150f; stroke-width: 1.8; stroke-linecap: round; }
+  #radar .dot     { fill: #ef8632; }
+  #radar .core    { fill: #16150f; }
+  #radar .fdot    { fill: #16150f; }
+  /* the caption lives inside the SVG, so it shares the disc's coordinates */
+  #radarText {
+    fill: #201e1c;
+    font-family: var(--sans);
+    font-size: 27px; font-weight: 600;
+    letter-spacing: 4.9px;
+    text-transform: uppercase;
+  }
+
+  /* ---------------- final lockup ---------------- */
+  #welcome {
+    position: absolute; left: 0; right: 0; top: 450px;
+    display: flex; flex-direction: column; align-items: center;
+    opacity: 0;
+  }
+  #welcome .l1 {
+    font-size: 60px; font-weight: 400; letter-spacing: .035em;
+    text-transform: uppercase; line-height: 1;
+  }
+  #welcome .l2 {
+    margin-top: 12px;
+    display: inline-block;
+    background: var(--ink); color: var(--paper);
+    font-size: 52px; font-weight: 700; letter-spacing: .015em;
+    text-transform: uppercase; line-height: 1.24;
+    padding: 2px 16px 5px;
+    white-space: nowrap;
+  }
+  #welcome .l3 {
+    margin-top: 10px;
+    font-size: 39px; font-weight: 500; letter-spacing: .045em;
+    text-transform: uppercase; line-height: 1;
+  }
+  #welcome .l2, #welcome .l3 { opacity: 0; }
+
+  #finalMark {
+    position: absolute; left: 0; right: 0; top: 668px;
+    display: flex; flex-direction: column; align-items: center;
+    opacity: 0;
+  }
+  #finalMark svg { width: 227px; height: 162px; display: block; }
+  #finalMark .fillBody { fill: var(--ink); }
+  #finalMark .caption {
+    margin-top: 12px;
+    font-size: 14.58px; font-weight: 500;
+    letter-spacing: .40em; text-transform: uppercase; color: #2a2826;
+  }
+
+  /* fade-through-black used at the very end of the sequence */
+  #curtain {
+    position: absolute; inset: 0; background: #0b0b0b;
+    opacity: 0; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="splash">
+  <div id="stage">
+    <div id="ghost"></div>
+    <div id="dnaBackdrop" aria-hidden="true">
+      <div class="dna-column" id="dnaLeft"><svg viewBox="0 0 360 3240"><g class="dna-scroll"></g></svg></div>
+      <div class="dna-column" id="dnaRight"><svg viewBox="0 0 360 3240"><g class="dna-scroll"></g></svg></div>
+    </div>
+
+    <!-- ===================== top-left identification ===================== -->
+    <div id="hud">
+      <div id="hudScan"></div>
+      <div class="line1">DeepSeek&nbsp;Harness</div>
+      <div class="line2">Synthesize&nbsp;Intelligence</div>
+      <div class="line3">Analysis&nbsp; <b>OS</b></div>
+    </div>
+
+    <!-- ===================== centred status read-out ===================== -->
+    <div id="access" aria-label="Access permission required"></div>
+
+    <!-- ===================== the mark + wordmark ===================== -->
+    <div id="markWrap">
+      <svg id="whale" viewBox="0 0 50 50" role="img" aria-label="DeepSeek">
+        <defs>
+          <clipPath id="wipe"><rect id="wipeRect" x="-2" y="-2" width="0" height="54"/></clipPath>
+        </defs>
+        <g clip-path="url(#wipe)">
+          <path class="fillBody" d="M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z"/>
+        </g>
+        <path class="draw" id="whaleDraw" d="M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z"/>
+      </svg>
+      <div id="wordmark"></div>
+    </div>
+
+    <!-- ===================== status line ===================== -->
+    <div id="status">
+      <span class="tick"></span>
+      <span id="statusText"></span>
+      <span id="scanbar"><i id="scanFill"></i></span>
+    </div>
+
+    <!-- ===================== authorization plate ===================== -->
+    <div id="radar">
+      <svg viewBox="0 0 700 700" aria-hidden="true">
+        <!-- Geometry measured off the reference video (tools/ring-gaps.py,
+             tools/sample-transition.py).  1 viewBox unit = 1 css px = 1 stage px.
+
+             The caption circle is a single broken ring.  From 22.0 s its opening
+             grows from 8 deg to 78 deg while the centre collapses from a
+             filled disc to a small dot and six dots fade in inside it - that growth
+             IS the disc's second form, exactly as the reference does it. -->
+        <g id="plateG">
+          <circle class="paperDisc" cx="350" cy="350" r="264"/>
+
+          <g id="whiteRingG">
+            <path class="glowArc" id="w1" d="M307 106 A248 248 0 1 0 583 435"/>
+          </g>
+
+          <g id="ringG">
+            <path class="arc" id="o1" d="M614 350 A264 264 0 1 0 613 373"/>
+          </g>
+
+          <!-- caption circle: one arc, its opening animated -->
+          <g id="textRingG">
+            <path class="arc thin" id="t1" d="M446 343 A96 96 0 1 0 446 357"/>
+            <path class="arc thin" id="t2" d="M446 343 A96 96 0 1 0 446 357" transform="rotate(180 350 350)"/>
+          </g>
+
+          <g id="irisG">
+            <path class="iris" id="i1" d="M510 327 A35 35 0 1 1 510 373"/>
+            <path class="iris" id="i2" d="M190 373 A35 35 0 1 1 190 327"/>
+          </g>
+
+          <!-- the centre: one disc that shrinks, plus the six dots that fade in -->
+          <g id="faceG">
+            <circle class="core" id="core" cx="350" cy="350" r="33"/>
+            <g id="faceDots">
+              <circle class="fdot" id="f1" cx="395" cy="338" r="6"/>
+              <circle class="fdot" id="f2" cx="305" cy="362" r="6"/>
+              <circle class="fdot" id="f3" cx="358" cy="310" r="6"/>
+              <circle class="fdot" id="f4" cx="342" cy="390" r="6"/>
+              <circle class="fdot" id="f5" cx="380" cy="380" r="6"/>
+              <circle class="fdot" id="f6" cx="320" cy="320" r="6"/>
+            </g>
+          </g>
+
+          <text id="radarText" x="350" y="350" text-anchor="middle"
+                dominant-baseline="middle" alignment-baseline="middle"></text>
+
+          <g id="dotsG">
+            <circle class="dot" id="d1" cx="350" cy="176" r="8"/>
+            <circle class="dot" id="d2" cx="350" cy="524" r="8"/>
+          </g>
+        </g>
+      </svg>
+    </div>
+
+    <!-- ===================== final lockup ===================== -->
+    <div id="welcome">
+      <div class="l1">Welcome&nbsp;to</div>
+      <div class="l2">DeepSeek&nbsp;Harness</div>
+      <div class="l3">Internal&nbsp;Database</div>
+    </div>
+    <div id="finalMark">
+      <svg viewBox="0 0 50 50" aria-hidden="true">
+        <path class="fillBody" d="M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z"/>
+      </svg>
+      <div class="caption">D e e p S e e k &nbsp;&middot;&nbsp; H a r n e s s</div>
+    </div>
+
+    <!-- ===================== credit ===================== -->
+    <div id="footer">
+      <span class="txt">Powered by DeepSeek Harness</span>
+      <span class="rule"></span>
+    </div>
+
+    <div id="vignette"></div>
+    <div id="curtain"></div>
+  </div>
+</div>
+
+<script>
+/* Source BV1rr4y1b7sz: 7-26 seconds, replayed at original speed. */
+const SPEED = 1;
+const HOLD = 900;              // hold on the final lockup before the curtain
+const R = (seconds) => Math.round((seconds - 7) * 1000); // 1:1, exact millisecond boundaries
+const T = {
+  /* ---- appearance ---- */
+  paperIn:   [R(6.95), R(7.12)],   // the paper must be up almost at once: the reference has no long black lead-in
+  accessOut: [R(8.75), R(9.05)],
+  markIn:    [R(9.25), R(10.3)],
+  wordmark:  [R(9.55), R(10.6)],
+  /* ---- identification ---- */
+  hudIn:     [R(11.05), R(11.65)],
+  scanBar:   [R(11.05), R(11.7)],
+  statusIn:  [R(11.3),  R(11.65)],
+  s1:        [R(11.4),  R(12.1)],
+  s2:        [R(12.6),  R(13.6)],
+  s3:        [R(17.0),  R(17.6)],
+  /* ---- the disc: the mark leaves, the plate draws on, then morphs ---- */
+  markOut:   [R(17.7), R(18.05)],
+  statusOut: [R(17.7), R(18.05)],
+  radarIn:   [R(19.6), R(21.2)],
+  radarText: [R(21.5),  R(21.9)],
+  /* ---- the lockup ---- */
+  radarOut:  [R(22.76), R(23.26)],
+  hudOut:    [R(22.8),  R(23.1)],
+  welcome:   [R(23.26), R(23.9)],
+  welcomeL2: [R(23.9),  R(24.4)],
+  welcomeL3: [R(24.7),  R(25.2)],
+  mark2:     [R(25.0),  R(25.6)]
+};
+const TOTAL = R(26);
+
+/* Ring path lengths in svg units, so openings can be expressed in degrees.
+   Measured: the outer ring opening is 22 deg when it appears and has closed
+   by 22.0 s; the caption circle opens from 8 deg to 78 deg as it morphs
+   into the disc's second form. */
+const L_OUTER = 1658.7609;              // 2*pi*264
+const L_WHITE = 1558.2300;              // 2*pi*248
+const L_TEXT  = 603.1858;              // 2*pi*96
+const LEN0 = L_OUTER * (360 - 22.0) / 360;
+const LEN1 = L_OUTER * (360 - 3.0) / 360;
+const W_LEN = L_WHITE * (360 - 26.0) / 360;
+const TLEN0 = L_TEXT * (360 - 8) / 360;   // opening 8 deg
+const TLEN1 = L_TEXT * (360 - 78) / 360;   // opening 78 deg
+const CORE_BIG = 33.0, CORE_SMALL = 11.0;  // white ring gap 26 deg
+
+/* ------------------------------ helpers ------------------------------ */
+const $  = (s) => document.querySelector(s);
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+/** progress of a [start,end] window, 0..1, clamped */
+const p = (r, t) => (r[1] <= r[0] ? (t >= r[0] ? 1 : 0) : clamp((t - r[0]) / (r[1] - r[0])));
+const easeOut  = (x) => 1 - Math.pow(1 - x, 3);
+const easeIn   = (x) => x * x * x;
+const easeIO   = (x) => (x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+
+/* ------------------------------ elements ----------------------------- */
+const el = {
+  stage: $('#stage'), ghost: $('#ghost'), curtain: $('#curtain'),
+  hud: $('#hud'), hudScan: $('#hudScan'), footer: $('#footer'),
+  access: $('#access'),
+  markWrap: $('#markWrap'), whale: $('#whale'), whaleDraw: $('#whaleDraw'),
+  wipeRect: $('#wipeRect'), wordmark: $('#wordmark'),
+  status: $('#status'), statusText: $('#statusText'), scanbar: $('#scanbar'), scanFill: $('#scanFill'),
+  radar: $('#radar'), radarText: $('#radarText'),
+  welcome: $('#welcome'), welcomeL2: $('#welcome .l2'), welcomeL3: $('#welcome .l3'),
+  finalMark: $('#finalMark')
+};
+
+/* ------------------------- stage scaling ---------------------------- */
+function fit() {
+  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  el.stage.style.transform = `translate(-50%, -50%) scale(${s})`;
+}
+addEventListener('resize', fit); fit();
+
+/* ---------------- measure stroke-dash lengths for the draw-on ---------------- */
+const dash = new Map();
+for (const node of document.querySelectorAll('#whale .draw, #radar .iris')) {
+  let len = 0;
+  try { len = node.getTotalLength(); } catch (_) { len = 0; }
+  dash.set(node, len);
+  if (len) {
+    node.style.strokeDasharray  = len + ' ' + (len + 2);
+    node.style.strokeDashoffset = len;
+  }
+}
+function drawOn(node, k) {
+  const len = dash.get(node) || 0;
+  if (!len) return;
+  node.style.strokeDashoffset = String((1 - clamp(k)) * len);
+}
+function setStrokeDash(node, len) {
+  dash.set(node, len);
+  node.style.strokeDasharray = len + ' ' + (len + 2);
+}
+
+/* ------------------------- static text fills ------------------------- */
+el.access.textContent = 'Access permission required';
+const ACCESS = 'Access permission required';
+el.access.innerHTML = [...ACCESS].map(c => `<span style="opacity:0">${c === ' ' ? '&nbsp;' : c}</span>`).join('');
+const accessLetters = [...el.access.children];
+// Repeating helix geometry; absolute-time scrolling is deterministic on replay.
+const DNA_PERIOD = 720;
+for (const [index, group] of [...document.querySelectorAll('.dna-scroll')].entries()) {
+  const phase = index * Math.PI / 3;
+  const x = (y, side) => 180 + side * 105 * Math.sin(y / DNA_PERIOD * Math.PI * 2 + phase);
+  const strands = [1,-1].map(side => {
+    let d = '';
+    for (let y = 0; y <= 3240; y += 4) d += `${y ? 'L' : 'M'}${x(y,side).toFixed(2)} ${y} `;
+    return `<path class="dna-strand" d="${d}"/>`;
+  }).join('');
+  let rungs = '';
+  for (let y = 0; y < 3240; y += 36) {
+    const depth = .28 + .45 * (1 + Math.cos(y / DNA_PERIOD * Math.PI * 2 + phase)) / 2;
+    rungs += `<line class="dna-rung" x1="${x(y,1)}" x2="${x(y,-1)}" y1="${y}" y2="${y}" opacity="${depth}"/>`;
+  }
+  group.innerHTML = strands + rungs;
+}
+el.statusText.textContent = '';
+el.radarText.textContent = 'Permission authorized';
+el.wordmark.textContent = 'D e e p S e e k';
+
+/* Build the "DEEPSEEK" wordmark so it can be typed letter by letter. */
+const WORD = ['D','E','E','P','S','E','E','K'];
+el.wordmark.innerHTML = WORD.map((c, i) =>
+  `<span class="wm" data-i="${i}" style="opacity:0">${c}</span>`).join('<span class="wsep" style="opacity:0">&nbsp;&middot;&nbsp;</span>'.repeat(0));
+const wmLetters = [...el.wordmark.querySelectorAll('.wm')].map((node) => node);
+
+/* faint lab glassware backdrop, drawn procedurally so the file stays self-contained */
+(function ghost() {
+  const blobs = [
+    [430, 210, 190, 250, .10], [700, 150, 150, 210, .08], [980, 250, 210, 230, .07],
+    [1330, 170, 170, 280, .09], [1600, 300, 150, 200, .06], [240, 330, 150, 190, .07]
+  ];
+  const shapes = blobs.map(([cx, cy, rx, ry, o]) =>
+    `<ellipse cx="${cx}" cy="${cy}" rx="${rx}" ry="${ry}" fill="#8d8a85" opacity="${o}"/>`).join('');
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080">${shapes}</svg>`;
+  el.ghost.style.backgroundImage = `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}")`;
+})();
+
+/* ------------------------- status message run ------------------------ */
+const MSG = [
+  { f: R(12.6), end: R(13.65), v: 'ID CONFIRMED : DEEPSEEK' },
+  { f: R(14.55), end: R(15.25), v: 'REQUEST RECEIVED' },
+  { f: R(16.5), end: R(17.1), until: R(18.05), v: 'START PROCESSING' }
+];
+function statusMessage(t) {
+  let current;
+  for (const message of MSG) if (t >= message.f) current = message;
+  if (current && current.until !== undefined && t >= current.until) return '';
+  return current ? current.v.slice(0, Math.ceil(current.v.length * p([current.f, current.end], t))) : '';
+}
+
+/* ------------------------------- frame ------------------------------- */
+/* ?t=<ms> renders one static frame  - used for design review and screenshots. */
+const STATIC_T = new URLSearchParams(location.search).get('t');
+let t0 = performance.now();
+let animationId = 0;
+let playbackMode = STATIC_T !== null ? 'paused' : 'playing';
+function frame(now) {
+  if (finished || playbackMode !== 'playing') return;
+  const raw = (now - t0) * SPEED;
+  const t = Math.min(raw, TOTAL + HOLD + 350);
+  render(t);
+  if (raw < TOTAL + HOLD + 350) animationId = requestAnimationFrame(frame);
+  else finish('completed');
+}
+function render(t) {
+  /* --- paper fade-in --- */
+  const paperK = easeOut(p(T.paperIn, t));
+  el.stage.style.opacity = String(clamp(paperK * 3));
+  el.ghost.style.opacity = String(0.22 * paperK);
+  $('#dnaBackdrop').style.opacity = String(.42 * paperK);
+  for (const group of document.querySelectorAll('.dna-scroll')) {
+    group.setAttribute('transform', `translate(0 ${-((Math.max(0,t) / 1000 * 28) % DNA_PERIOD)})`);
+  }
+
+  /* --- ACCESS read-out --- */
+  const aIn  = easeOut(p([120, 420], t));
+  const aOut = easeIn(p(T.accessOut, t));
+  el.access.style.opacity = String(aIn * (1 - aOut));
+  const accessCount = Math.floor(ACCESS.length * p([160, 1160], t));
+  accessLetters.forEach((letter, i) => { letter.style.opacity = i < accessCount ? '1' : '0'; });
+
+  /* --- the whale mark draws on, then the wordmark types out --- */
+  const mIn  = p(T.markIn, t);
+  const mOut = easeIO(p(T.markOut, t));
+  el.markWrap.style.opacity = String(clamp(mIn * 3) * (1 - mOut));
+  el.markWrap.style.transform = `translate(${lerp(0, -300, easeIO(p([R(11), R(11.85)], t)))}px, ${lerp(8, 0, easeOut(mIn))}px)`;
+
+  const fillK = clamp((mIn - 0.55) / 0.45);          // outline first, then the body
+  const wipeK = easeOut(clamp((mIn - 0.62) / 0.38));
+  el.wipeRect.setAttribute('width', String(54 * wipeK));
+  el.whaleDraw.style.opacity = String(clamp(mIn * 1.6) * (1 - fillK));
+  drawOn(el.whaleDraw, easeIO(mIn));
+
+  /* --- wordmark: letter by letter --- */
+  const wK = p(T.wordmark, t);
+  wmLetters.forEach((node, i) => {
+    const from = i / WORD.length, to = from + 1 / WORD.length;
+    const k = clamp((wK - from) / (to - from));
+    node.style.opacity = String(k);
+    node.style.display = k > 0 ? 'inline' : 'none';
+  });
+
+  /* --- identification block + scan --- */
+  const hIn = easeOut(p(T.hudIn, t));
+  const hOut = easeIn(p(T.hudOut, t));
+  el.hud.style.opacity = String(hIn * (1 - hOut));
+  el.hud.style.transform = `translateX(${lerp(-16, 0, hIn)}px)`;
+  el.hudScan.style.opacity = String(clamp((1 - Math.abs(p(T.scanBar, t) - .5) * 2.4)) * hIn * (1 - hOut));
+  el.hudScan.style.left = lerp(-74, 430, easeIO(p(T.scanBar, t))) + 'px';
+
+  /* --- status line beside the mark --- */
+  const sIn = easeOut(p(T.statusIn, t));
+  const sOut = easeIO(p(T.statusOut, t));
+  const sAlive = sIn * (1 - sOut) * (t >= MSG[0].f && t < R(18.05) ? 1 : 0);
+  el.status.style.opacity = String(sAlive * (1 - hOut));
+  el.status.style.transform = `translateX(${lerp(-10, 0, sIn)}px)`;
+  const msg = statusMessage(t);
+  if (el.statusText.textContent !== msg) el.statusText.textContent = msg;
+  const showBar = false;
+  el.scanbar.style.opacity = showBar ? String(sAlive * (1 - hOut)) : '0';
+  el.scanFill.style.width = (showBar ? lerp(0, 100, easeOut(p([T.s3[0] - 60, T.s3[0] + 560], t))) : 0) + '%';
+
+  /* Reference geometry measured from 91 native frames, 19.4-23s. */
+  const ref = t / 1000 + 7;
+  // Cubic Hermite interpolation gives continuous position and angular velocity.
+  const track = (keys, time) => {
+    if (time <= keys[0][0]) return keys[0][1];
+    const last = keys.length - 1;
+    if (time >= keys[last][0]) return keys[last][1];
+    let i = 0;
+    while (time > keys[i + 1][0]) i++;
+    const [a, av] = keys[i], [b, bv] = keys[i + 1];
+    const u = (time - a) / (b - a), d = b - a;
+    const slope = k => k === 0 ? (keys[1][1] - keys[0][1]) / (keys[1][0] - keys[0][0])
+      : k === last ? (keys[last][1] - keys[last-1][1]) / (keys[last][0] - keys[last-1][0])
+      : (keys[k+1][1] - keys[k-1][1]) / (keys[k+1][0] - keys[k-1][0]);
+    return (2*u*u*u-3*u*u+1)*av + (u*u*u-2*u*u+u)*d*slope(i)
+      + (-2*u*u*u+3*u*u)*bv + (u*u*u-u*u)*d*slope(i+1);
+  };
+  const radius = track([[19.6,800],[19.88,460],[20.12,325],[20.4,218],
+    [20.6,171.5],[20.8,142.5],[21.2,120],[21.4,118],[21.8,114.5],
+    [22.2,112],[22.6,110],[23,110]], Math.min(ref,22.6));
+  const flash = Math.max(p([R(20.98),R(21)],t)*(1-p([R(21.04),R(21.08)],t)),
+    p([R(21.10),R(21.12)],t)*(1-p([R(21.16),R(21.20)],t)));
+  const baseScale = radius * 1920 / 852 / 264;
+  const scale = baseScale + .9 * flash;
+  const rOut = easeOut(p(T.radarOut,t));
+  const closeRings = easeIO(p([R(22.6),R(22.72)],t));
+  el.radar.style.opacity = String(p([R(19.6),R(19.84)],t)*(1-rOut));
+  el.radar.style.transform = `scale(${scale})`;
+  const setTurn = (selector, angle, size=1) => {
+    const node=$(selector); node.style.transformOrigin='350px 350px';
+    node.style.transform=`rotate(${angle}deg) scale(${size})`;
+  };
+  for(const node of document.querySelectorAll('#ringG,#whiteRingG,#textRingG,#irisG,#faceG,#dotsG,.paperDisc')) {
+    node.style.filter=`blur(${flash*1.8}px)`;node.style.opacity=String(1-.7*flash);
+  }
+  const outerAngle = track([[19.6,170],[20,115],[20.4,44],[20.6,17.2],
+    [20.8,-10],[21.2,-47.8],[21.4,-60.8],[21.6,-70.8],[21.8,-78],
+    [22,-83.2],[22.2,-88],[22.6,-96],[23,-104]],ref);
+  const opening = Math.max(1.5,track([[19.6,170],[20.4,70],[20.6,63.5],[20.8,46],
+    [21.2,22.5],[21.4,14.5],[21.6,8.5],[21.8,4],[22,1.5],[23,1.5]],ref));
+  const arc = (node,radius,mid,span) => {
+    const point = deg => [350+radius*Math.cos(deg*Math.PI/180),350+radius*Math.sin(deg*Math.PI/180)];
+    const a=point(mid-span/2),b=point(mid+span/2);
+    const opposite=point(mid);
+    node.setAttribute('d', span >= 359.999
+      ? `M${a[0]} ${a[1]} A${radius} ${radius} 0 1 1 ${opposite[0]} ${opposite[1]} A${radius} ${radius} 0 1 1 ${a[0]} ${a[1]} Z`
+      : `M${a[0]} ${a[1]} A${radius} ${radius} 0 ${span>180?1:0} 1 ${b[0]} ${b[1]}`);
+    node.style.strokeDasharray='none';node.style.strokeDashoffset='0';
+  };
+  arc($('#o1'),264,180,360-opening*(1-closeRings));setTurn('#ringG',outerAngle);
+  arc($('#w1'),248,180,360-Math.max(2,opening*.65)*(1-closeRings));setTurn('#whiteRingG',outerAngle-12);
+  $('#o1').style.opacity=String(p([R(19.88),R(20.08)],t));
+  $('#w1').style.opacity=String(p([R(19.72),R(19.96)],t));
+  const morph=easeIO(p([R(21.96),R(22.06)],t));
+  const half=lerp(72,50.4,morph);
+  arc($('#t1'),96,-90,half*2);arc($('#t2'),96,90,half*2);
+  $('#t2').removeAttribute('transform');
+  // Reach horizontal gaps exactly as the satellite circles close, then stop.
+  const stopProgress = p([R(22.6),R(22.72)],t);
+  // Approach zero from below, decelerating without overshooting or reversing.
+  const centreTurn = ref < 22.6 ? 12*(ref-22.66) : -.72 * (1-stopProgress)**2;
+  setTurn('#textRingG',centreTurn,1/baseScale);
+  $('#textRingG').style.opacity=String(p([R(19.64),R(19.84)],t)*(1-.7*flash));
+  const orangeAngle=track([[19.6,-30],[20,-90],[20.4,-172.3],[20.6,-15.7-180],[20.8,-33.4-180],
+    [21.2,-59-180],[21.4,-67.3-180],[21.8,-79.7-180],[22.2,-86.4-180],
+    [22.6,-90-180],[23,-90-180]],Math.min(ref,22.6));
+  // The two orange points are diametrically opposed; unwrap their direction.
+  setTurn('#dotsG',orangeAngle+90,1/baseScale);
+  el.radarText.style.transformOrigin='350px 350px';
+  el.radarText.style.transform=`scale(${1/scale})`;
+  el.radarText.style.opacity=String(p([R(19.6),R(19.95)],t)*(1-p([R(21.8),R(22)],t)));
+  el.radarText.style.letterSpacing=lerp(6,4.9,p([R(19.6),R(20.4)],t))+'px';
+  const faceTime=Math.min(ref,22.6);
+  setTurn('#irisG',8*(faceTime-22.6));setTurn('#faceDots',-12*(faceTime-22.6));
+  for(const [id,side] of [['i1',1],['i2',-1]]) {
+    const cx=350+side*128/baseScale, r=37/baseScale;
+    const span=lerp(lerp(210,350,p([R(22.04),R(22.6)],t)),360,closeRings);
+    const start=(id==='i1'?150:-30)+90*(faceTime-22.12);
+    const point=deg=>[cx+r*Math.cos(deg*Math.PI/180),350+r*Math.sin(deg*Math.PI/180)];
+    const a=point(start),b=point(start+span),node=$('#'+id);
+    const opposite=point(start+180);
+    node.setAttribute('d',span>=359.999
+      ? `M${a[0]} ${a[1]} A${r} ${r} 0 1 1 ${opposite[0]} ${opposite[1]} A${r} ${r} 0 1 1 ${a[0]} ${a[1]} Z`
+      : `M${a[0]} ${a[1]} A${r} ${r} 0 1 1 ${b[0]} ${b[1]}`);
+    node.removeAttribute('transform');node.style.strokeDasharray='none';node.style.strokeDashoffset='0';
+    node.style.opacity=String(p([R(21.8),R(22.12)],t));
+  }
+  $('#core').setAttribute('r',String(lerp(42,11,morph)));
+  $('#core').style.opacity=String(p([R(21.8),R(21.88)],t));
+  [22.04,22.12,22.2,22.28,22.36,22.44].forEach((at,i)=>{
+    $('#f'+(i+1)).style.opacity=String(p([R(at),R(at+.12)],t));
+  });
+
+  /* --- final lockup --- */
+  const wIn = easeOut(p(T.welcome, t));
+  el.welcome.style.opacity = String(wIn);
+  el.welcome.style.transform = `translateY(${lerp(12, 0, wIn)}px)`;
+  el.welcomeL2.style.opacity = String(easeOut(p(T.welcomeL2, t)));
+  el.welcomeL3.style.opacity = String(easeOut(p(T.welcomeL3, t)));
+  const fIn = easeOut(p(T.mark2, t));
+  el.finalMark.style.opacity = String(fIn);
+  el.finalMark.style.transform = `translateY(${lerp(10, 0, fIn)}px)`;
+
+  /* --- credit --- */
+  const ftIn = easeOut(p([T.hudIn[1] + 120, T.hudIn[1] + 620], t));
+  el.footer.style.opacity = String(ftIn * (1 - hOut));
+
+  /* --- nothing after the hold --- */
+  el.curtain.style.opacity = String(easeOut(p([TOTAL + HOLD, TOTAL + HOLD + 320], t)));
+}
+
+let finished = false;
+function finish(reason) {
+  if (finished) return;
+  finished = true;
+  playbackMode = 'finished';
+  cancelAnimationFrame(animationId);
+  document.getElementById('splash').hidden = true;
+  document.getElementById('splash').style.display = 'none';
+  dispatchEvent(new CustomEvent('dsh:splash-complete', { detail: { reason } }));
+}
+function pauseAt(ms) {
+  cancelAnimationFrame(animationId);
+  playbackMode = 'paused';
+  finished = false;
+  $('#splash').hidden = false;
+  $('#splash').style.display = '';
+  render(clamp(Number(ms) || 0, 0, TOTAL + HOLD + 350));
+}
+function replay() {
+  cancelAnimationFrame(animationId);
+  finished = false;
+  playbackMode = 'playing';
+  $('#splash').hidden = false;
+  $('#splash').style.display = '';
+  render(0);
+  t0 = performance.now();
+  animationId = requestAnimationFrame(frame);
+}
+window.DSHSplash = Object.freeze({
+  duration: TOTAL + HOLD + 350,
+  skip: () => finish('skipped'),
+  replay,
+  renderAt: pauseAt
+});
+addEventListener('keydown', (event) => { if (event.key === 'Escape') finish('skipped'); });
+animationId = requestAnimationFrame(frame);
+document.title = 'READY';
+window.__splashReady = true;
+/* expose the renderer so a static frame can be inspected or exported */
+window.__renderAt = pauseAt;
+
+if (STATIC_T !== null) {
+  /* Force layout first: getTotalLength() returns 0 until the SVG has been laid out,
+     which would leave every stroke-dashoffset animation stuck on its first frame. */
+  void document.body.offsetHeight;
+  render(Number(STATIC_T) || 0);
+  document.body.dataset.staticFrame = STATIC_T;
+}
+</script>
+</body>
+</html>
