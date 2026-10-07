@@ -6,7 +6,9 @@
 
 ## 安装
 
-需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。此前在桌面端 0.2.0-rc.2 确认过播放；本次修订通过离线测试，尚未重新验证桌面端画面。
+需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。此前在桌面端 0.2.0-rc.2 确认过播放。
+
+在deepseek harness的插件市场中选择npm官方源或中国大陆镜像源后输入dsh-opening-splash即可直接安装；
 
 从 npm 安装到 Windows 桌面 profile：
 
@@ -74,28 +76,7 @@ Invoke-RestMethod http://127.0.0.1:19387/dsh-opening/health.json
 
 使用 `link:` 安装时，修改 `lib/index.js` 必须重启宿主；修改 `assets/` 后刷新页面即可重新读取。更换动画时还需同步更新宿主的 `ANIMATION_DURATION_MS`，保证跨源兜底计时准确。
 
-## 开发与验证
 
-```powershell
-$projectTestTmp = Join-Path (Get-Location) '.codex\test-tmp'
-New-Item -ItemType Directory -Force $projectTestTmp | Out-Null
-$env:TEMP = $projectTestTmp
-$env:TMP = $projectTestTmp
-$env:TMPDIR = $projectTestTmp
-$env:TEST_TMPDIR = $projectTestTmp
-npm test
-```
-
-测试不需要安装依赖，覆盖配置、路由、生成脚本的解析与执行、注入去重、播放控制、跨源兜底和诊断上报。浏览器测试使用 DOM 桩，不检查实际画面；请另在 DSH 中检查完整播放、Esc、配置关闭和刷新行为。
-
-```text
-assets/splash.html   自包含动画
-assets/opening.js    覆盖层、播放控制和诊断
-lib/index.js        宿主路由、配置和注入桥接
-cordis.patch.yml    DSH 挂载声明
-PROVENANCE.md       动画来源与品牌说明
-tests/              离线回归测试
-```
 
 ## 已知限制
 
