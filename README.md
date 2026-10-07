@@ -8,14 +8,20 @@
 
 需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。此前在桌面端 0.2.0-rc.2 确认过播放；本次修订通过离线测试，尚未重新验证桌面端画面。
 
-下载或克隆仓库后，将插件目录安装到实际使用的 profile。例如 Windows 桌面 profile：
+从 npm 安装到 Windows 桌面 profile：
+
+```powershell
+dsh plugin --profile desktop add dsh-opening-splash
+```
+
+离线或开发时，下载或克隆仓库后，将插件目录安装到实际使用的 profile：
 
 ```powershell
 dsh plugin --profile desktop add link:D:\path\to\dsh-opening-splash
 dsh plugin --profile desktop list
 ```
 
-安装后重启 DeepSeek Harness 并刷新页面。路径必须指向含 `package.json` 的插件目录。其他 profile 请替换 `desktop`。本项目不承诺已发布到 npm。
+安装后重启 DeepSeek Harness 并刷新页面。本地路径必须指向含 `package.json` 的插件目录。其他 profile 请替换 `desktop`。
 
 ## 配置
 

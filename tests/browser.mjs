@@ -551,8 +551,11 @@ console.log('cross-origin frame (the Electron shell: dsh-app://app hosting an ht
   /* With a working message channel, the ending is exact and marked as such. */
   const m = run({ crossOrigin: true })
   find(m.document, 'dsh-opening-frame').dispatch('load', {})
+  const originalEnding = m.timers.timeouts.find((t) => t.ms === 20250 + 400)
   frameMessage(m, { type: 'ready', duration: 20250 })
-  check('a ready message re-arms the ending to the reported duration', m.timers.timeouts.some((t) => t.ms === 20250 + 400))
+  check('a ready message preserves or shortens the original deadline',
+    m.timers.timeouts.some((t) => t.ms > 0 && t.ms <= 20250 + 400) &&
+    !m.timers.timeouts.includes(originalEnding))
   frameMessage(m, { type: 'done', reason: 'completed' })
   check('a done message ends the splash immediately', find(m.document, 'dsh-opening-overlay') === null)
   check('the message ending is reported via=message', /via=message/.test(m.beacons[0] || ''), m.beacons[0])

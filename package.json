@@ -2,6 +2,14 @@
   "name": "dsh-opening-splash",
   "version": "1.0.0",
   "description": "DeepSeek Harness opening splash: plays the DSH software-opening animation full screen when the Web UI boots, then fades into the app (skippable, speed and frequency configurable)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LIYue-hope/dsh-opening-splash.git"
+  },
+  "homepage": "https://github.com/LIYue-hope/dsh-opening-splash#readme",
+  "bugs": {
+    "url": "https://github.com/LIYue-hope/dsh-opening-splash/issues"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
