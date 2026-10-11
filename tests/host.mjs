@@ -1,11 +1,26 @@
 // Functional check of the host half without DSH. Run with the bundled node.
 import { readFileSync } from 'node:fs'
-import { Config, apply, normalizeConfig, OPENING_PATH, SPLASH_PATH, HEALTH_PATH, PLAYED_PATH } from '../lib/index.js'
+import { Config, apply, normalizeConfig, DEFAULTS, OPENING_PATH, SPLASH_PATH, HEALTH_PATH, PLAYED_PATH } from '../lib/index.js'
 
 let failures = 0
 function check(name, cond, extra) {
   if (cond) { console.log('  ok   ' + name) }
   else { failures++; console.log('  FAIL ' + name + (extra === undefined ? '' : '  -> ' + JSON.stringify(extra))) }
+}
+
+/**
+ * The gestures the served bridge is armed with.
+ *
+ * The bridge always carries both listeners and decides at runtime whether to
+ * attach them, so these flags -- not the presence of a listener in the source --
+ * are what a deployment's config actually controls. The parent page reconciles
+ * them afterwards, which is why they cannot simply be omitted. `on` is the
+ * master switch; `click` and `dbl` are the two gestures.
+ */
+function bridgeFlags(html) {
+  const match = /var api=\{on:(true|false),click:(true|false),dbl:(true|false)/.exec(html)
+  if (!match) throw new Error('the served bridge no longer declares its flags')
+  return { on: match[1] === 'true', click: match[2] === 'true', dbl: match[3] === 'true' }
 }
 
 console.log('config normalization')
@@ -112,7 +127,7 @@ console.log('routes')
   check('health 200', r3.status === 200, r3.status)
   const parsed = JSON.parse(r3.body)
   check('health reports the plugin', parsed.plugin === 'dsh-opening-splash')
-  check('health carries both asset sizes', parsed.assets['splash.html'] === 43140 && parsed.assets['opening.js'] > 0, parsed.assets)
+  check('health carries both asset sizes', parsed.assets['splash.html'] === readFileSync(new URL('../assets/splash.html', import.meta.url)).length && parsed.assets['opening.js'] > 0, parsed.assets)
   check('health reflects config', parsed.speed === 2 && parsed.enabled === true)
 
   const r4 = await call(loader.handler, 'POST')
@@ -133,10 +148,12 @@ console.log('the cross-origin bridge appended to the served animation')
   const served = (await call(byPath[SPLASH_PATH].handler, 'GET')).body
   const asset = readFileSync(new URL('../assets/splash.html', import.meta.url), 'utf8')
 
-  check('the asset on disk is untouched (43140 bytes, byte-identical to the deliverable)',
-    Buffer.byteLength(asset) === 43140)
+  check('the shipped animation matches the standalone deliverable',
+    asset === readFileSync(new URL('../../deepseek-harness-opening.html', import.meta.url), 'utf8'))
   check('the served document adds the bridge and identity adaptation',
-    served.includes("get v() { return 'ID CONFIRMED : '") && served.includes('850 / (el.statusText.offsetWidth'))
+    served.includes('get v() { var n = window.__DSH_OPENING_IDENTITY__;')
+    && served.includes("typeof n === 'string' && n ? n : 'DEEPSEEK'")
+    && served.includes('850 / (el.statusText.offsetWidth'))
   check('the original animation prefix is preserved',
     served.indexOf(asset.slice(0, 4000)) === 0)
   check('the bridge sits immediately before </body>',
@@ -150,23 +167,36 @@ console.log('the cross-origin bridge appended to the served animation')
   check('the bridge carries the speed override', served.includes('requestAnimationFrame'))
   check('HEAD carries no bridge body', (await call(byPath[SPLASH_PATH].handler, 'HEAD')).body === '')
 
-  /* skipOnClick off by default: the frame must not even send click intent. */
-  check('no click listener in the bridge by default', !served.includes('pointerdown'))
+  /* The bridge now carries both gestures and arms them from its own flags: what
+     a deployment turns off is the arming, not the listener's presence in the
+     source. The listener has to be there regardless, because the parent page
+     reconciles these flags at runtime -- the switches live in its storage, not
+     in the served config. */
+  const disarms = (html) => /if\(api\.on===true&&api\.click===true\)on\("pointerdown"\);else off\("pointerdown"\)/.test(html)
+
+  /* The master switch is on by default, but neither gesture is: single-click
+     skipping must stay off until it is asked for. */
+  check('the default bridge arms neither gesture',
+    JSON.stringify(bridgeFlags(served)) === JSON.stringify({ on: true, click: false, dbl: false }), bridgeFlags(served))
+  check('and disarms whichever the parent turns off', disarms(served))
   check('a key skip listener is present by default', served.includes('"Escape"'))
 
-  /* With click skipping on, it appears; with skipping off entirely, neither. */
+  /* With click skipping on, its flag is set; with skipping off, neither is. */
   const h2 = {}
   apply(makeRoot(h2), { skipOnClick: true })
   const by2 = Object.fromEntries(h2['webServer.register'].map((r) => [r.path, r]))
   const served2 = (await call(by2[SPLASH_PATH].handler, 'GET')).body
-  check('the click listener appears when skipOnClick is on', served2.includes('pointerdown'))
+  check('the click flag is set when skipOnClick is on', bridgeFlags(served2).click === true)
 
   const h3 = {}
   apply(makeRoot(h3), { skippable: false })
   const by3 = Object.fromEntries(h3['webServer.register'].map((r) => [r.path, r]))
   const served3 = (await call(by3[SPLASH_PATH].handler, 'GET')).body
-  check('no skip listeners at all when skippable is false',
-    !served3.includes('pointerdown') && served3.includes('var allowed=false'))
+  /* `skippable: false` is the master switch: no gesture is armed whatever the
+     individual flags say, and the key listener refuses everything. */
+  check('no gesture is armed when skippable is false',
+    bridgeFlags(served3).on === false && bridgeFlags(served3).dbl === false
+    && served3.includes('var allowed=false'), bridgeFlags(served3))
 
   /* The speed override must carry the configured value. */
   const h4 = {}
@@ -174,6 +204,100 @@ console.log('the cross-origin bridge appended to the served animation')
   const by4 = Object.fromEntries(h4['webServer.register'].map((r) => [r.path, r]))
   const served4 = (await call(by4[SPLASH_PATH].handler, 'GET')).body
   check('the bridge carries the configured speed', served4.includes('var SPEED=2.5'), served4.match(/var SPEED=[^;]*/)?.[0])
+}
+
+console.log('the double-click ending')
+{
+  const serve = async (config) => {
+    const handlers = {}
+    apply(makeRoot(handlers), config)
+    const byPath = Object.fromEntries(handlers['webServer.register'].map((r) => [r.path, r]))
+    return (await call(byPath[SPLASH_PATH].handler, 'GET')).body
+  }
+
+  /* Off by default: the frame is served with the gesture unarmed. */
+  const off = await serve({})
+  check('the double-click flag is off by default', bridgeFlags(off).dbl === false)
+  check('and the default is carried into the browser config',
+    normalizeConfig({}).skipOnDoubleClick === false && normalizeConfig({}).rippleReveal === true)
+
+  const on = await serve({ skipOnDoubleClick: true })
+  check('the double-click flag is set when enabled', bridgeFlags(on).dbl === true)
+  check('the frame reports the gesture with its point',
+    on.includes('post({type:"skip",how:"dblclick",point:{x:Math.round(ev.clientX||0),y:Math.round(ev.clientY||0)}})'))
+  check('the point is read off the event', on.includes('Math.round(ev.clientX||0)'))
+  check('double click leaves playback running',
+    !on.includes('stop()};') && on.includes('function stop()'))
+
+  const both = await serve({ skipOnClick: true, skipOnDoubleClick: true })
+  check('both gestures can be armed at once',
+    bridgeFlags(both).dbl === true && bridgeFlags(both).click === true)
+
+  /* With skipping off entirely, neither gesture may be armed. */
+  const locked = await serve({ skippable: false, skipOnDoubleClick: true })
+  check('skippable:false suppresses the double-click flag too',
+    bridgeFlags(locked).on === false && bridgeFlags(locked).dbl === false, bridgeFlags(locked))
+}
+
+console.log('the name the opening shows')
+{
+  const serve = async (config) => {
+    const handlers = {}
+    apply(makeRoot(handlers), config)
+    const byPath = Object.fromEntries(handlers['webServer.register'].map((r) => [r.path, r]))
+    const served = await call(byPath[SPLASH_PATH].handler, 'GET')
+    const health = JSON.parse((await call(byPath[HEALTH_PATH].handler, 'GET')).body)
+    return { served: served.body, health }
+  }
+
+  const { served, health } = await serve({})
+  /* The patch is a literal replacement into the archived animation; a moved
+     anchor would silently stop every account name from appearing. */
+  check('the animation carries the dynamic-name reader',
+    served.includes("get v() { var n = window.__DSH_OPENING_IDENTITY__;"))
+  check('an absent name falls back to the shipped default',
+    served.includes("typeof n === 'string' && n ? n : 'DEEPSEEK'"))
+  check('the shipped literal is what the patch replaced', !served.includes("v: 'ID CONFIRMED : DEEPSEEK'"))
+  check('the health endpoint reports that the patch applied', health.identityPatched === true)
+
+  /* The name policy itself lives in the browser half; the host's part is the
+     patch above. What must hold here is that the config never mistakes a
+     deployment switch for a page preference. */
+  check('revertName is not silently normalized into something else',
+    JSON.stringify(normalizeConfig({ revertName: true })) === JSON.stringify(normalizeConfig({})))
+}
+
+console.log('the ripple reveal configuration')
+{
+  const d = normalizeConfig({})
+  check('the reveal has its own duration', d.rippleMs === 1800)
+  check('rippleMs cannot be zero, which would make the reveal instant',
+    normalizeConfig({ rippleMs: 0 }).rippleMs === 1)
+  check('rippleMs is capped', normalizeConfig({ rippleMs: 1e9 }).rippleMs === 10000)
+  check('garbage rippleMs falls back', normalizeConfig({ rippleMs: 'slow' }).rippleMs === 1800)
+  check('the reveal can be turned off by the deployment',
+    normalizeConfig({ rippleReveal: false }).rippleReveal === false)
+  check('and defaults on', d.rippleReveal === true)
+
+  const config = DEFAULTS
+  check('the new switches have defaults', config.skipOnDoubleClick === false && config.rippleReveal === true)
+
+  /* The browser half is served the switches it needs to honour them. */
+  const handlers = {}
+  apply(makeRoot(handlers), { skipOnDoubleClick: true, rippleMs: 900, rippleReveal: false })
+  const byPath = Object.fromEntries(handlers['webServer.register'].map((r) => [r.path, r]))
+  const loader = (await call(byPath[OPENING_PATH].handler, 'GET')).body
+  const prelude = JSON.parse(/window\.__DSH_OPENING__=(\{[\s\S]*?\});/.exec(loader)[1])
+  check('the loader prelude carries skipOnDoubleClick', prelude.skipOnDoubleClick === true)
+  check('the loader prelude carries rippleMs', prelude.rippleMs === 900)
+  check('the loader prelude carries rippleReveal', prelude.rippleReveal === false)
+  check('the loader prelude carries the other gestures too',
+    prelude.skipOnClick === false && prelude.skippable === true)
+
+  /* And the health endpoint exposes them, so a deployment can be inspected. */
+  const health = JSON.parse((await call(byPath[HEALTH_PATH].handler, 'GET')).body)
+  check('health reports the gestures', health.skipOnDoubleClick === true && health.rippleReveal === false)
+  check('health reports the reveal duration', health.rippleMs === 900)
 }
 
 console.log('generated scripts must PARSE, not merely contain the right words')

@@ -3,8 +3,15 @@
 // execute every decision the loader makes: suppression, overlay construction,
 // skip wiring, the load watchdog, the completion path and the cleanup.
 //
+// The bridge cases below run the host's own generated bridge script, so the
+// message ORDER is the one a real frame produces. A shortcut that hand-builds
+// the messages can pass while the real order is wrong; that is exactly how a
+// "done before skip" ordering bug survived the first round of these checks.
+//
 // Run: node browser-half-check.mjs
 import fs from 'node:fs'
+import vm from 'node:vm'
+import { bridgeScript, normalizeConfig } from '../lib/index.js'
 
 const SRC = fs.readFileSync(new URL('../assets/opening.js', import.meta.url), 'utf8')
 
@@ -17,7 +24,7 @@ function check(name, cond, extra) {
 /* ------------------------------- DOM shim -------------------------------- */
 
 function makeNode(tag) {
-  return {
+  const node = {
     tagName: String(tag).toUpperCase(),
     id: '',
     _attrs: {},
@@ -53,6 +60,19 @@ function makeNode(tag) {
     },
     dispatch(type, event) { for (const fn of (this._listeners[type] || []).slice()) fn(event || {}) },
   }
+  /* A browser exposes the standard mask property and an alias for the prefixed
+     spelling; the reveal writes both, so the shim accepts both. `mask` is the
+     reading side, used by the checks to see how far the hole has grown. */
+  let mask = ''
+  Object.defineProperty(node.style, 'maskImage', {
+    get() { return mask },
+    set(value) { mask = String(value) },
+  })
+  Object.defineProperty(node.style, 'webkitMaskImage', {
+    get() { return mask },
+    set(value) { mask = String(value) },
+  })
+  return node
 }
 
 function makeDocument() {
@@ -135,12 +155,30 @@ function makeBlockedWindow(deliver) {
     /* What the host-appended bridge inside the animation posts. */
     post(data) { sent.push(data); if (deliver) deliver(data) },
     sent,
+    /* The harness's handle on the frame itself: the loader's own reads still
+       throw, but the checks can announce readiness the way the served bridge
+       does when a same-origin read is not available. */
+    frame: null,
+    /* The one call the parent may make into a cross-origin frame. Given a body
+       so the checks can stand in for it; by default it keeps what it is told. */
+    postMessage(data) { target.received.push(data) },
+    received: [],
+    beReady() {
+      target.__splashReady = true
+      target.DSHSplash = { duration: 20250, skip() {} }
+    },
   }
+  target.frame = target
   const proxy = new Proxy(target, {
     get(_t, prop) {
-      /* Identity checks and the harness's own bookkeeping stay reachable; every
-         real document read throws, exactly like the browser. */
-      if (prop === 'post' || prop === 'sent') return target[prop]
+      /* `postMessage` is the one call a real cross-origin WindowProxy does
+         answer -- it is how the two sides talk at all -- so the shim must not
+         block it, or the parent could never reach the frame and these tests
+         would pass for the wrong reason. Everything else the loader reads
+         (DSHSplash, document, finished) still throws, exactly like a browser. */
+      if (prop === 'frame' || prop === 'post' || prop === 'sent' || prop === 'beReady' || prop === 'postMessage') {
+        return target[prop]
+      }
       throw new DOMExceptionStub('Blocked a frame with origin "dsh-app://app" from accessing a cross-origin frame.')
     },
     has() { return true },
@@ -165,7 +203,7 @@ function makeStorage() {
  *  `sharedSession` / `sharedLocal` reuse one storage area across runs, which is
  *  how a real reload behaves; `beforeFactory` runs before the loader does, so
  *  pre-set globals can be tested. */
-function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigin = false, sharedSession, sharedLocal, beforeFactory } = {}) {
+function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigin = false, sharedSession, sharedLocal, beforeFactory, masks = false, noHref = false } = {}) {
   const document = makeDocument()
   /* The proxy needs the parent window to deliver into, so it is built after. */
   let frameWindow = null
@@ -182,22 +220,42 @@ function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigi
       if (i >= 0) list.splice(i, 1)
     },
     dispatch(type, event) { for (const fn of (window._listeners[type] || []).slice()) fn(event || {}) },
+    /* The loader announces its ending with a window event; a shim without this
+       would swallow that announcement and the throw would go unnoticed. */
+    dispatchEvent(event) {
+      window.dispatch(event.type, event)
+      return true
+    },
     sessionStorage: sharedSession || makeStorage(),
     localStorage: sharedLocal || makeStorage(),
   }
   frameWindow = crossOrigin
     ? makeBlockedWindow((data) => window.dispatch('message', { source: frameWindow, data }))
     : makeFrameWindow()
-  const location = { search, hash, protocol: origin }
+  /* A real document always exposes `href`; message targeting resolves against it,
+     so the shim must carry one or it would quietly mask a broken base. */
+  const location = { href: `${origin}//dsh.test/`, search, hash, protocol: origin }
+  /* `noHref` models the document that cannot supply one. */
+  if (noHref) delete location.href
   if (beforeFactory) beforeFactory(window)
 
   /* createElement('iframe') hands back a node whose contentWindow is the stub. */
   const realCreate = document.createElement.bind(document)
   document.createElement = (tag) => {
     const node = realCreate(tag)
-    if (String(tag).toLowerCase() === 'iframe') node.contentWindow = frameWindow
+    if (String(tag).toLowerCase() === 'iframe') {
+      node.contentWindow = frameWindow
+      /* The overlay fills the viewport, so the frame's rect is the viewport's. */
+      node.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1440, bottom: 810, width: 1440, height: 810 })
+    }
     return node
   }
+
+  /* Mask support is a capability, not a given: `masks` decides whether this run
+     is on an engine the reveal can animate. */
+  const CSS = { supports: (prop) => masks && (prop === 'mask-image' || prop === '-webkit-mask-image') }
+  const frames = []
+  const requestAnimationFrameShim = (fn) => { frames.push(fn); return { fn } }
 
   const CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init && init.detail } }
   const timers = { timeouts: [], intervals: [] }
@@ -214,11 +272,20 @@ function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigi
       if (maxMs === undefined || t.ms <= maxMs) { clearShim(t); t.fn() }
     }
   }
+  /* Run the animation frames the reveal asked for, in order. */
+  let frameTime = 0
+  const flushFrames = (count = 200) => {
+    for (let guard = 0; frames.length && guard < count; guard++) {
+      frames.shift()(frameTime)
+      frameTime += 16
+    }
+  }
 
   const factory = new Function(
     'window', 'document', 'location', 'CustomEvent',
     'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'console',
     'sessionStorage', 'localStorage', 'navigator', 'fetch', 'Image',
+    'CSS', 'requestAnimationFrame',
     `"use strict";\n${SRC}\n`,
   )
   const beacons = []
@@ -228,9 +295,10 @@ function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigi
     setTimeoutShim, setIntervalShim, clearShim, clearShim, { log() {}, warn() {} },
     window.sessionStorage, window.localStorage,
     { userAgent: 'shim/1.0' }, fetchStub, class { constructor() { this.src = '' } },
+    CSS, requestAnimationFrameShim,
   )
 
-  return { window, document, frameWindow, timers, fireTimeouts, beacons }
+  return { window, document, frameWindow, timers, fireTimeouts, flushFrames, beacons }
 }
 
 const find = (doc, id) => doc.getElementById(id)
@@ -247,13 +315,95 @@ function frameToken(r) {
   return new URL('http://x' + src).searchParams.get('k')
 }
 
-/** Deliver a message the way the host-appended bridge does. */
+/** Announce the frame document arriving, as its load event does. */
+function armCrossOrigin(r) {
+  r.frameWindow.frame.beReady()
+  find(r.document, 'dsh-opening-frame').dispatch('load', {})
+}
+
+/**
+ * Deliver a message the way the host-appended bridge does.
+ *
+ * The payload wins where the two overlap: a real bridge message already carries
+ * the token the frame was loaded with, so a bridge built with the parent's own
+ * token (see `makeBridge`) hands over a message the parent accepts.
+ */
 function frameMessage(r, data) {
   r.window.dispatch('message', {
     source: r.frameWindow,
     data: Object.assign({ source: 'dsh-opening-splash', k: frameToken(r) }, data),
   })
 }
+/**
+ * Run the real bridge script inside a stub animation document.
+ *
+ * This is the frame's own half of the protocol: the host builds it from its
+ * config and serves it with the animation, and it is what actually decides when
+ * to report a gesture. Everything it posts is queued in order, so the checks
+ * assert the ORDER the parent would really receive.
+ */
+function makeBridge(config, token = 'bridge-token') {
+  const listeners = {}
+  const queue = []
+  const parent = { postMessage: (m) => queue.push(m) }
+  const win = {
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn) },
+    DSHSplash: {
+      duration: 20250,
+      /* The animation's own finish(): it hides the clip and announces it. */
+      skip() { for (const fn of (listeners['dsh:splash-complete'] || []).slice()) fn({ detail: { reason: 'skipped' } }) },
+    },
+  }
+  const doc = {
+    addEventListener(type, fn) { (listeners[type] ||= []).push(fn) },
+    removeEventListener(type, fn) {
+      const list = listeners[type]
+      if (!list) return
+      const i = list.indexOf(fn)
+      if (i >= 0) list.splice(i, 1)
+    },
+  }
+  vm.runInNewContext(
+    bridgeScript(normalizeConfig(config)).replace(/^<script>/, '').replace(/<\/script>$/, ''),
+    {
+      window: win,
+      document: doc,
+      parent,
+      /* The token the host put in the frame's URL, so what the bridge reports
+         carries the same one the parent is waiting for. */
+      location: { search: '?k=' + token },
+      URLSearchParams,
+      fetch: () => Promise.resolve({}),
+      setTimeout: () => 0,
+      clearTimeout: () => {},
+    },
+  )
+  queue.length = 0
+  return {
+    listeners,
+    queue,
+    /** Fire an event at the frame's document, as a real gesture would. */
+    fire(type, event) {
+      for (const fn of (listeners[type] || []).slice()) {
+        fn({ type, clientX: 120, clientY: 90, preventDefault() {}, stopImmediatePropagation() {}, ...event })
+      }
+    },
+    /** Hand the parent everything this frame said, in the order it said it. */
+    say(r) {
+      for (const m of queue.splice(0)) frameMessage(r, m)
+    },
+    /** Deliver one message from the parent into the frame. */
+    tell(message) {
+      for (const fn of (listeners.message || []).slice()) {
+        fn({ source: parent, data: { source: 'dsh-opening-parent', k: token, ...message } })
+      }
+    },
+  }
+}
+
+/** The two colour stops of the mask, as lengths. The centre is not a stop. */
+const maskStops = (style) => [...style.maskImage.matchAll(/(?:rgba\([^)]*\)|#000)\s+([\d.]+)px/g)]
+  .map((m) => Number(m[1]))
 
 /* ------------------------------- the checks ------------------------------- */
 
@@ -627,5 +777,356 @@ console.log('regressions for suppression and duration limits')
   locked.frameWindow.document.dispatch?.('keydown', { key: 'Escape' })
   check('unskippable same-origin frame has no key skip handler', !(locked.frameWindow.document._listeners.keydown || []).length)
 }
+/* ------------------------- the user's own switches ------------------------- */
+
+/* Where the Settings page stores its switches. The loader is the half that reads
+   them, at boot, so the key and the field names are a cross-file contract. */
+const PREFS_KEY = 'dsh-opening-splash:settings'
+
+/** A storage area pre-loaded with the switches the Settings page would write. */
+function prefsStorage(prefs) {
+  const area = makeStorage()
+  area.setItem(PREFS_KEY, JSON.stringify(prefs))
+  return area
+}
+
+/** The element a click would land on: the frame sits inside the overlay. */
+const OVERLAY_ID = 'dsh-opening-overlay'
+
+function doubleClick(r, point) {
+  r.window.dispatch('dblclick', { clientX: point.x, clientY: point.y })
+}
+
+const rings = (r) => (find(r.document, 'dsh-opening-ripples')?.children || [])
+  .filter((child) => child.getAttribute('data-dsh-opening-ripple') === 'ring')
+
+const overlayStyle = (r) => find(r.document, OVERLAY_ID).style
+
+/**
+ * The radius the mask's hole has reached.
+ *
+ * The hole is the transparent region, so its radius is the FIRST stop -- the
+ * point where the splash starts showing again, not where the black is total.
+ */
+function holeRadius(r) {
+  return maskStops(overlayStyle(r))[0] ?? null
+}
+
+{
+  /* Off by default: a double click must not end the opening. */
+  const off = run()
+  doubleClick(off, { x: 400, y: 300 })
+  check('a double click does nothing by default', find(off.document, OVERLAY_ID) !== null)
+
+  /* On: the opening ends with the reveal rather than the fade. */
+  const on = run({ config: { skipOnDoubleClick: true }, masks: true })
+  /* Listening before the gesture: the ending is announced while the reveal is
+     still running, which is the whole point of announcing it from the teardown
+     rather than from the fade. */
+  const completion = []
+  on.window.addEventListener('dsh:opening-complete', (event) => completion.push(event.detail.reason))
+  doubleClick(on, { x: 300, y: 200 })
+  const node = find(on.document, OVERLAY_ID)
+  check('same-origin animation stays visible during reveal', !on.frameWindow.finished && !find(on.frameWindow.document, 'splash').hidden)
+  const completionBefore = completion.slice()
+  check('a double click ends the opening when enabled', node !== null)
+  check('the ending is reported as a double click', on.beacons.some((url) => url.includes('reason=dblclick')))
+  check('the reveal reports itself as a skip', on.beacons.some((url) => url.includes('via=skip')))
+
+  /* Two rings, from the point the gesture landed on. */
+  const list = rings(on)
+  check('two ripple rings are drawn', list.length === 2)
+  check('both rings are centred on the double click',
+    list.every((ring) => ring.style.cssText.includes('left:300px') && ring.style.cssText.includes('top:200px')))
+  check('the rings are animated from the plugin, not the page', on.document.getElementById('dsh-opening-ripple-keyframes') !== null)
+  check('the inner ring is the smaller of the two',
+    Number(/width:([\d.]+)px/.exec(list[0].style.cssText)[1]) < Number(/width:([\d.]+)px/.exec(list[1].style.cssText)[1]))
+  check('the base ring starts last, behind the leading one',
+    list[0].style.cssText.includes('180ms') && !list[1].style.cssText.includes('180ms'))
+
+  /* The splash itself is masked away from that same point. */
+  const start = holeRadius(on)
+  check('the splash starts masked with no hole', start !== null && start === 0)
+  check('the mask is centred on the double click',
+    overlayStyle(on).maskImage.includes('circle at 300px 200px'))
+
+  /* The mask's geometry, not just its spelling: the first stop is the hole's
+     radius and the second a short shoulder past it. Reversing them -- or
+     passing a fraction where a length belongs -- renders as if there were no
+     hole at all, which is how the first build of this shipped. */
+  const startStops = maskStops(overlayStyle(on))
+  check('the mask starts with an ordered pair of stops',
+    startStops.length === 2 && startStops[0] === 0 && startStops[1] === 0, startStops)
+
+  check('the app underneath is revealed, not the boot canvas',
+    !on.document.documentElement.hasAttribute('data-dsh-opening-boot'))
+  /* Nothing behind the hole may be clicked through the splash. */
+  check('the overlay swallows clicks during the reveal', overlayStyle(on).pointerEvents === 'none')
+
+  /* And the hole grows to clear the viewport. */
+  on.flushFrames(40)
+  const middle = holeRadius(on)
+  check('the reveal grows gradually', middle > 0 && middle < Math.hypot(1140, 610), middle)
+  check('rings are outside the splash mask', list.every((ring) => ring.parentNode !== node))
+  check('the animation iframe remains attached during expansion', find(on.document, 'dsh-opening-frame') !== null)
+  on.flushFrames()
+  const endStops = maskStops(overlayStyle(on))
+  const farCorner = Math.hypot(1440 - 300, 810 - 200)
+  check('the hole expands past the far corner', endStops[0] >= farCorner, [endStops[0], farCorner])
+  check('and stays a length rather than a runaway number', endStops[0] < farCorner + 100, endStops[0])
+  check('the stops stay ordered at the end', endStops[0] <= endStops[1], endStops)
+  check('the edge stays a soft shoulder, not a second hole',
+    endStops[1] - endStops[0] < endStops[0] / 2, endStops)
+  check('the hole radius agrees with the first stop', holeRadius(on) === endStops[0])
+  check('the mask is written for both spellings',
+    overlayStyle(on).webkitMaskImage === overlayStyle(on).maskImage)
+  check('playback document is removed only once the reveal covers the viewport', find(on.document, 'dsh-opening-frame') === null)
+
+  /* The reveal announces the ending like the fade does: a caller waiting on the
+     event must not wait forever just because the reveal was the ending. */
+  check('the reveal announced the ending before the overlay went away',
+    JSON.stringify(completionBefore) === JSON.stringify(['dblclick']), completionBefore)
+  on.fireTimeouts(5000)
+  check('the overlay is removed when the reveal ends', find(on.document, OVERLAY_ID) === null)
+  check('wave layer is cleaned up', find(on.document, 'dsh-opening-ripples') === null)
+  check('the reveal is not left as a fade', node.getAttribute('data-dsh-opening') === 'active')
+  check('and the ending is announced exactly once',
+    JSON.stringify(completion) === JSON.stringify(['dblclick']), completion)
+}
+
+{
+  /* A host that turned the reveal off still honours the gesture, plainly. */
+  const plain = run({ config: { skipOnDoubleClick: true, rippleReveal: false }, masks: true })
+  const plainDone = []
+  plain.window.addEventListener('dsh:opening-complete', (event) => plainDone.push(event.detail.reason))
+  doubleClick(plain, { x: 100, y: 100 })
+  check('rippleReveal:false still ends the opening', plainDone.length === 1 && plainDone[0] === 'dblclick')
+  check('and draws no rings', rings(plain).length === 0)
+}
+
+{
+  /* An engine that cannot animate a mask must still end the opening. */
+  const noMask = run({ config: { skipOnDoubleClick: true } })
+  const noMaskDone = []
+  noMask.window.addEventListener('dsh:opening-complete', (event) => noMaskDone.push(event.detail.reason))
+  doubleClick(noMask, { x: 100, y: 100 })
+  check('without mask support the ending still happens', noMaskDone.length === 1 && noMaskDone[0] === 'dblclick')
+  check('without mask support no rings are drawn', rings(noMask).length === 0)
+}
+
+{
+  /* The switches the Settings page wrote are what makes the gesture live. */
+  const shared = prefsStorage({ skipOnDoubleClick: true, defaultName: false })
+  const stored = run({ sharedLocal: shared, masks: true })
+  doubleClick(stored, { x: 20, y: 20 })
+  check('the stored switch enables the double click', rings(stored).length === 2)
+
+  const unsaved = run({ masks: true })
+  doubleClick(unsaved, { x: 20, y: 20 })
+  check('without the stored switch the gesture stays off', rings(unsaved).length === 0)
+
+  /* A stored switch that is not a boolean is ignored rather than believed. */
+  const junk = run({ sharedLocal: prefsStorage({ skipOnDoubleClick: 'yes' }), masks: true })
+  doubleClick(junk, { x: 20, y: 20 })
+  check('a non-boolean stored switch is ignored', rings(junk).length === 0)
+
+  const blocked = run({ sharedLocal: { getItem() { throw new Error('blocked') }, setItem() {} }, masks: true })
+  doubleClick(blocked, { x: 20, y: 20 })
+  check('unreadable storage falls back to the config', rings(blocked).length === 0)
+}
+
+{
+  /* The same gesture reported by the frame, which is the only channel on the
+     Electron shell: the point arrives in the frame's coordinates. */
+  const viaFrame = run({ config: { skipOnDoubleClick: true }, crossOrigin: true, masks: true })
+  armCrossOrigin(viaFrame)
+  frameMessage(viaFrame, { type: 'skip', how: 'dblclick', point: { x: 120, y: 90 } })
+  const list = rings(viaFrame)
+  check('a double click reported by the frame opens the reveal', list.length === 2)
+  check('the frame\'s point is translated into page coordinates',
+    list[0].style.cssText.includes('left:120px') && list[0].style.cssText.includes('top:90px'))
+
+  /* Without a point, the reveal still happens -- from the middle of the screen. */
+  const noPoint = run({ config: { skipOnDoubleClick: true }, crossOrigin: true, masks: true })
+  armCrossOrigin(noPoint)
+  frameMessage(noPoint, { type: 'skip', how: 'dblclick' })
+  check('a point-less report still reveals', rings(noPoint).length === 2)
+  check('and centres on the middle of the viewport',
+    overlayStyle(noPoint).maskImage.includes('circle at 720px 405px'))
+
+  /* The message is only honoured when the config allows the gesture. */
+  const refused = run({ crossOrigin: true, masks: true })
+  armCrossOrigin(refused)
+  frameMessage(refused, { type: 'skip', how: 'dblclick', point: { x: 10, y: 10 } })
+  check('a reported double click is refused when the setting is off', rings(refused).length === 0)
+}
+
+/* ------------------- the frame's own bridge, end to end ------------------- */
+
+console.log('the frame bridge, driven as the browser drives it')
+{
+  /* The bridge reports the gesture BEFORE stopping the animation. Stopping it
+     dispatches the completion the parent listens for, so the other order ends
+     the opening with the plain fade and the reveal never runs. This is the
+     regression a hand-built message sequence cannot catch. */
+  const r = run({ config: { skipOnDoubleClick: true }, crossOrigin: true, masks: true })
+  armCrossOrigin(r)
+  const bridge = makeBridge({ skipOnDoubleClick: true }, frameToken(r))
+  bridge.fire('dblclick')
+  check('the bridge reports only the gesture and leaves playback running',
+    JSON.stringify(bridge.queue.map((m) => m.type)) === JSON.stringify(['skip']), bridge.queue.map((m) => m.type))
+  bridge.say(r)
+  check('the reveal runs on the real message order', rings(r).length === 2,
+    { beacons: r.beacons, rings: rings(r).length })
+  check('and the ending is the double click, not a plain skip',
+    r.beacons.some((url) => url.includes('reason=dblclick')) && !r.beacons.some((url) => url.includes('reason=skipped')))
+  check('the completion the bridge caused does not end the opening twice',
+    r.window.DSHOpening.isPlaying() === false && rings(r).length === 2)
+}
+{
+  /* A real animation completion still ends the opening the ordinary way. */
+  const r = run({ config: { skipOnDoubleClick: true }, crossOrigin: true, masks: true })
+  armCrossOrigin(r)
+  const done = []
+  r.window.addEventListener('dsh:opening-complete', (event) => done.push(event.detail.reason))
+  frameMessage(r, { type: 'done', reason: 'completed' })
+  check('a genuine completion still ends the opening', JSON.stringify(done) === JSON.stringify(['completed']))
+  check('and does not become a reveal', rings(r).length === 0)
+}
+{
+  /* The frame cannot read the page's storage, so the parent must project the
+     switches into it -- otherwise a switch turned on in Settings does nothing
+     on the Electron shell, where the served config is the bridge's only input. */
+  const storage = prefsStorage({ skipOnDoubleClick: true })
+  const r = run({ sharedLocal: storage, crossOrigin: true, masks: true })
+  armCrossOrigin(r)
+  const bridge = makeBridge({})
+  check('the served bridge starts without the gesture', (bridge.listeners.dblclick || []).length === 0)
+
+  const received = r.frameWindow.frame.received
+  received.length = 0
+  frameMessage(r, { type: 'ready', duration: 20250 })
+  const prefs = received.find((m) => m.type === 'prefs')
+  check('the parent projects its switches into the frame', Boolean(prefs))
+  check('and projects the double-click switch it has on', prefs && prefs.prefs.skipOnDoubleClick === true)
+
+  bridge.tell({ type: 'prefs', prefs: prefs.prefs })
+  check('the frame arms the gesture the host never wired', (bridge.listeners.dblclick || []).length === 1)
+  check('without arming the gesture the user did not ask for', (bridge.listeners.pointerdown || []).length === 0)
+}
+{
+  /* Each switch arms and disarms its own gesture, and re-telling changes nothing. */
+  const r = run({ config: { skipOnClick: true }, crossOrigin: true, masks: true })
+  const bridge = makeBridge({ skipOnClick: true })
+  bridge.tell({ type: 'prefs', prefs: { skipOnClick: true, skipOnDoubleClick: true } })
+  check('the double click arms alongside the single click', (bridge.listeners.dblclick || []).length === 1)
+  bridge.tell({ type: 'prefs', prefs: { skipOnClick: true, skipOnDoubleClick: true } })
+  check('a repeated projection does not double-arm', (bridge.listeners.dblclick || []).length === 1)
+  bridge.tell({ type: 'prefs', prefs: { skipOnClick: true, skipOnDoubleClick: false } })
+  check('turning the switch off disarms just that gesture',
+    (bridge.listeners.dblclick || []).length === 0 && (bridge.listeners.pointerdown || []).length === 1)
+  void r
+}
+{
+  /* With both gestures on, the frame's first press must wait too: the frame
+     reports a click the parent would honour immediately otherwise. */
+  const r = run({ config: { skipOnClick: true, skipOnDoubleClick: true }, crossOrigin: true, masks: true })
+  armCrossOrigin(r)
+  const bridge = makeBridge({ skipOnClick: true, skipOnDoubleClick: true })
+  bridge.fire('pointerdown')
+  check('the frame holds a first press back while the double click is live',
+    bridge.queue.length === 0, bridge.queue.map((m) => m.type))
+
+  /* With only the single click on, it reports at once as it always did. */
+  const clickOnly = makeBridge({ skipOnClick: true })
+  clickOnly.fire('pointerdown')
+  check('a click-only frame still reports the press at once',
+    JSON.stringify(clickOnly.queue.map((m) => m.how)) === JSON.stringify(['click']))
+}
+
+{
+  /* With both gestures on, a single click must wait out the double-click
+     interval instead of ending the opening on the first half of a double click. */
+  const both = run({ config: { skipOnClick: true, skipOnDoubleClick: true }, masks: true })
+  const clicked = () => find(both.document, OVERLAY_ID) === null
+  both.window.dispatch('pointerdown', {})
+  check('one click alone does not end the opening', !clicked())
+  both.fireTimeouts(400)
+  check('the click ends the opening once no second click follows', clicked())
+
+  const twice = run({ config: { skipOnClick: true, skipOnDoubleClick: true }, masks: true })
+  twice.window.dispatch('pointerdown', {})
+  twice.window.dispatch('pointerdown', {})
+  twice.fireTimeouts(400)
+  check('a second click cancels the single-click ending', find(twice.document, OVERLAY_ID) !== null)
+
+  /* Double click alone leaves the single click out of it entirely. */
+  const dblOnly = run({ config: { skipOnDoubleClick: true }, masks: true })
+  dblOnly.window.dispatch('pointerdown', {})
+  dblOnly.fireTimeouts(400)
+  check('with only the double click on, a single click does nothing', find(dblOnly.document, OVERLAY_ID) !== null)
+
+  /* Escape keeps working however the gestures are set. */
+  const escape = run({ config: { skipOnDoubleClick: true }, masks: true })
+  escape.window.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  check('Escape still ends the opening', find(escape.document, OVERLAY_ID) === null)
+
+  /* The hint names the gesture the user actually has. */
+  const hinted = run({ config: { skipOnDoubleClick: true, showSkipHint: true } })
+  check('the hint names the double click when it is on',
+    find(hinted.document, 'dsh-opening-hint').textContent.includes('\u53cc\u51fb'))
+  const plainHint = run({ config: { showSkipHint: true } })
+  check('the hint stays Esc-only otherwise',
+    find(plainHint.document, 'dsh-opening-hint').textContent === 'Esc \u8DF3\u8fc7')
+}
+
+/* --------------------- the name the opening shows --------------------- */
+
+{
+  /* The published name is how the account integration reaches the animation. */
+  const named = run()
+  named.window.DSHOpening.setIdentity('Alice')
+  check('a published name is kept as published', named.window.__DSH_OPENING_IDENTITY__ === 'Alice')
+
+  /* The "restore the default name" switch withdraws it, and a name arriving
+     afterwards must not slip back in. */
+  const restored = run({ sharedLocal: prefsStorage({ defaultName: true }) })
+  restored.window.DSHOpening.setIdentity('Alice')
+  check('the switch withdraws the account name', restored.window.__DSH_OPENING_IDENTITY__ === null)
+
+  /* Turning it back off leaves the name the page already had. */
+  restored.window.DSHOpening.setPrefs({ defaultName: false })
+  check('turning the switch off restores the name', restored.window.__DSH_OPENING_IDENTITY__ === 'Alice')
+
+  /* A deployment can pin the default name, whatever the browser stored. */
+  const pinned = run({ config: { revertName: true } })
+  pinned.window.DSHOpening.setIdentity('Alice')
+  check('the config pins the default name', pinned.window.__DSH_OPENING_IDENTITY__ === null)
+
+  /* The identity handed to the frame follows the same policy. */
+  const framed = run({ sharedLocal: prefsStorage({ defaultName: true }) })
+  const sent = []
+  framed.frameWindow.postMessage = (data) => sent.push(data)
+  framed.window.DSHOpening.setIdentity('Alice')
+  check('the frame is told the default name', sent.some((data) => data.type === 'identity' && data.label === null),
+    sent)
+  /* And the published name really is the account's when the switch is off. */
+  const open = run()
+  const openSent = []
+  open.frameWindow.postMessage = (data) => openSent.push(data)
+  open.window.DSHOpening.setIdentity('Alice')
+  check('the frame is told the account name otherwise',
+    openSent.some((data) => data.type === 'identity' && data.label === 'Alice'), openSent)
+
+  /* A document with no readable href must not cost the frame its name: the
+     throw would be swallowed as "the account was unavailable". */
+  const noHref = run({ noHref: true })
+  const noHrefSent = []
+  noHref.frameWindow.postMessage = (data) => noHrefSent.push(data)
+  noHref.window.DSHOpening.setIdentity('Alice')
+  check('a document without href still reaches the frame',
+    noHrefSent.some((data) => data.type === 'identity'), noHrefSent)
+}
+
 console.log(failures === 0 ? '\nALL BROWSER-HALF CHECKS PASSED' : `\n${failures} BROWSER-HALF CHECK(S) FAILED`)
 process.exitCode = failures === 0 ? 0 : 1

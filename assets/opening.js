@@ -29,10 +29,21 @@
   var PLAYED_PATH = '/dsh-opening/played'
   var SESSION_KEY = 'dsh-opening:session'
   var STORE_KEY = 'dsh-opening:last-played'
+  /* Where the Settings page stores the switches the user flipped. This half owns
+     the read: it runs at boot, synchronously, before the first paint, while the
+     Settings page that writes it may not even be loaded yet.
+     Key and field names are a contract with lib/client.js -- keep them in step. */
+  var PREFS_KEY = 'dsh-opening-splash:settings'
   /* Slack after the animation's own runtime before the overlay is taken away,
      for the case where nothing inside the frame can be observed. The animation
      fades its curtain in over its last 320 ms, so this stays invisible. */
   var COMPLETION_TAIL_MS = 400
+  /* How long the ripple's soft edge takes to settle once its hole has grown. */
+  var RIPPLE_SETTLE_MS = 400
+  /* The interval a double click is recognised within. Matched to the platform's
+     own double-click time closely enough for a gesture, and only ever used to
+     hold a single click back when both click and double click are enabled. */
+  var DOUBLE_CLICK_MS = 320
 
   var overlay = null
   var frame = null
@@ -56,7 +67,53 @@
   var capDeadline = 0
   var loadTimer = 0
   var hintTimer = 0
+  var clickTimer = 0
+  var rippleTimer = 0
+  /* A reveal is running: the animation has been stopped on purpose so the hole
+     uncovers a standing screen, and its completion is not the opening's end. */
+  var rippleActive = false
   var detach = []
+
+  /* ------------------------- the user's own settings ------------------------ */
+
+  /**
+   * Read the switches the Settings page stored.
+   *
+   * Every failure mode -- no storage, unreadable storage, junk in the slot,
+   * a value of the wrong type -- answers "no preferences", which leaves the
+   * deployment's config exactly as composed.
+   */
+  function readPrefs() {
+    try {
+      var raw = localStorage.getItem(PREFS_KEY)
+      if (!raw) return {}
+      var parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch (err) {
+      return {}
+    }
+  }
+
+  /** Fold the stored switches over the served config. */
+  function mergePrefs(prefs) {
+    if (!prefs) return
+    if (typeof prefs.skipOnDoubleClick === 'boolean') CFG.skipOnDoubleClick = prefs.skipOnDoubleClick
+    if (typeof prefs.defaultName === 'boolean') CFG.revertName = prefs.defaultName
+  }
+
+  /**
+   * Is the opening showing the animation's own default name?
+   *
+   * The published label and this flag are two sources for one fact, so they are
+   * reconciled in one place: while the flag is on the label is withdrawn, and
+   * the animation falls back to `DEEPSEEK` -- which is the whole point of the
+   * switch, and what makes it take effect without a reload.
+   */
+  function applyNamePolicy() {
+    var label = CFG.revertName === true ? null : identityLabel
+    try { window.__DSH_OPENING_IDENTITY__ = label } catch (err) { /* ignore */ }
+    sendIdentity(label)
+  }
 
   function log() {
     if (!CFG.debug) return
@@ -191,8 +248,12 @@
         'user-select:none',
         'z-index:1'
       ].join(';')
-      /* "Esc skip" in Chinese, written as \u escapes so this file stays ASCII. */
-      hint.textContent = 'Esc \u8DF3\u8FC7'
+      /* "Esc skip" / "double click or Esc skip", in Chinese, written as \u escapes
+         so this file stays ASCII. The hint names the gesture the user actually
+         has, which is the only place it is ever advertised. */
+      hint.textContent = CFG.skipOnDoubleClick === true
+        ? '\u53cc\u51fb\u6216 Esc \u8DF3\u8FC7'
+        : 'Esc \u8DF3\u8FC7'
       overlay.appendChild(hint)
     }
 
@@ -227,15 +288,38 @@
 
   /* ------------------------------- skipping -------------------------------- */
 
-  function skip(reason) {
+  /**
+   * End the opening.
+   *
+   * `detail` may carry where a double click landed and whether the reveal is
+   * allowed, in which case the overlay is opened up rather than faded out.
+   */
+  function skip(reason, detail) {
     if (finished) return
-    /* Ask the animation to stop itself first, so its own state stays coherent.
-       Only reachable same-origin; the frame is removed with the overlay anyway. */
+    var reveal = detail && detail.ripple === true && CFG.rippleReveal !== false
+    /*
+     * The animation is told to stop only when the ending will not reveal it.
+     * Its own `skip` ends the clip and announces completion, and that
+     * announcement is what tears the overlay down -- so asking for it first
+     * would finish the opening with the ordinary fade and the reveal would
+     * never run. On the reveal path the frame is stopped by the side that
+     * knows the reveal is coming (the bridge, same document; or this module's
+     * teardown, which takes the overlay away whatever happens next).
+     */
+    if (!reveal) stopAnimation()
+    if (reveal) {
+      finishRipple(reason, detail.point)
+      return
+    }
+    finish(reason, 'skip')
+  }
+
+  /** Ask the animation to end its own clip, keeping its own state coherent. */
+  function stopAnimation() {
     try {
       var w = frame && frame.contentWindow
       if (w && w.DSHSplash && typeof w.DSHSplash.skip === 'function') w.DSHSplash.skip()
     } catch (err) { /* cross-origin; finish() below still runs */ }
-    finish(reason, 'skip')
   }
 
   function wireSkip() {
@@ -247,13 +331,311 @@
       try { event.preventDefault(); event.stopPropagation() } catch (err) { /* ignore */ }
       skip('key')
     }, true)
+
     /* Click-to-skip is opt-in: by default a stray click at boot must not end the
        opening early. */
-    if (CFG.skipOnClick !== true) return
-    on(window, 'pointerdown', function (event) {
-      try { event.preventDefault(); event.stopPropagation() } catch (err) { /* ignore */ }
-      skip('click')
+    if (CFG.skipOnClick === true) {
+      on(window, 'pointerdown', function (event) {
+        /* With double click also on, the first click of a double click must not
+           win: the single click waits out the double-click interval, and a
+           second click that lands in time cancels it. Only then can the
+           deliberate gesture reach the ripple instead of a plain skip. */
+        if (CFG.skipOnDoubleClick !== true) { skip('click'); return }
+        if (clickTimer) { clearTimeout(clickTimer); clickTimer = 0; return }
+        clickTimer = setTimeout(function () {
+          clickTimer = 0
+          skip('click')
+        }, DOUBLE_CLICK_MS)
+      }, true)
+    }
+
+    if (CFG.skipOnDoubleClick !== true) return
+    /* The parent's own view of the gesture, for both carriers: in a browser the
+       frame is same-origin, on the Electron shell it is not and the bridge
+       reports instead. Both land here, and a duplicate is dropped by `finished`. */
+    on(window, 'dblclick', function (event) {
+      var point = null
+      try {
+        point = { x: Number(event && event.clientX) || 0, y: Number(event && event.clientY) || 0 }
+      } catch (err) { /* ignore */ }
+      skip('dblclick', { ripple: true, point: point })
     }, true)
+  }
+
+  /* ---------------------------- the ripple reveal --------------------------- */
+
+  /**
+   * Where the expanding hole is centred.
+   *
+   * A point reported by the frame is in the frame's own viewport, so the frame's
+   * offset on the page is added back; without a point -- the parent's own
+   * gesture, or a frame that could not be measured -- the opening is revealed
+   * from the middle of the screen.
+   */
+  function revealPoint(point) {
+    var x = window.innerWidth / 2
+    var y = window.innerHeight / 2
+    if (!point) return { x: x, y: y }
+    if (isFinite(point.x) && isFinite(point.y)) {
+      x = Number(point.x)
+      y = Number(point.y)
+      try {
+        if (frame && typeof frame.getBoundingClientRect === 'function') {
+          var rect = frame.getBoundingClientRect()
+          if (rect) { x += Number(rect.left) || 0; y += Number(rect.top) || 0 }
+        }
+      } catch (err) { /* an unmeasurable frame still reveals from the right spot */ }
+    }
+    return { x: x, y: y }
+  }
+
+  /** How far the hole must grow to clear the viewport from a given origin. */
+  function revealReach(x, y) {
+    var width = window.innerWidth || 1
+    var height = window.innerHeight || 1
+    var corners = [
+      Math.sqrt(x * x + y * y),
+      Math.sqrt((width - x) * (width - x) + y * y),
+      Math.sqrt(x * x + (height - y) * (height - y)),
+      Math.sqrt((width - x) * (width - x) + (height - y) * (height - y))
+    ]
+    return Math.max(corners[0], corners[1], corners[2], corners[3]) + 8
+  }
+
+  /**
+   * Is a mask animatable on this engine?
+   *
+   * Feature-detected rather than assumed: the reveal is a mask, and an engine
+   * without one would otherwise be left showing nothing at all until the timer
+   * took the overlay away.
+   */
+  function maskAnimatable() {
+    try {
+      if (typeof CSS === 'undefined' || !CSS || typeof CSS.supports !== 'function') return false
+      return CSS.supports('mask-image', 'radial-gradient(circle at 50% 50%, transparent 0px, #000 1px)')
+        || CSS.supports('-webkit-mask-image', 'radial-gradient(circle at 50% 50%, transparent 0px, #000 1px)')
+    } catch (err) {
+      return false
+    }
+  }
+
+  /** Set one mask value on both the standard and the prefixed property. */
+  function setMask(style, value) {
+    try { style.maskImage = value } catch (err) { /* ignore */ }
+    try { style.webkitMaskImage = value } catch (err) { /* ignore */ }
+  }
+
+  /** One ripple ring: a hairline circle that fades as it travels outward. */
+  function rippleRing(x, y, size, duration, delay) {
+    var ring = document.createElement('div')
+    ring.setAttribute('data-dsh-opening-ripple', 'ring')
+    ring.style.cssText = [
+      'position:absolute',
+      'left:' + x + 'px',
+      'top:' + y + 'px',
+      'width:' + size + 'px',
+      'height:' + size + 'px',
+      'margin:0',
+      'box-sizing:border-box; border:2px solid rgba(190,225,255,.95);box-shadow:0 0 6px rgba(80,160,255,.45)',
+      'border-radius:50%',
+      'transform:translate(-50%,-50%) scale(0)',
+      'opacity:0',
+      'pointer-events:none',
+      'will-change:transform,opacity',
+      'animation:dsh-opening-ripple ' + duration + 'ms linear ' + delay + 'ms forwards'
+    ].join(';')
+    return ring
+  }
+
+  /* The keyframes ship with the script rather than with the page, so the reveal
+     works on a carrier whose stylesheet this plugin does not control. */
+  var RIPPLE_KEYFRAMES = '@keyframes dsh-opening-ripple{0%{opacity:0}10%{opacity:.95}55%{opacity:.7}85%{opacity:.25}100%{opacity:0}}'
+
+  function installRippleKeyframes() {
+    var id = 'dsh-opening-ripple-keyframes'
+    try {
+      if (document.getElementById(id)) return
+      var tag = document.createElement('style')
+      tag.id = id
+      tag.textContent = RIPPLE_KEYFRAMES
+      var host = document.head || document.documentElement
+      if (host) host.appendChild(tag)
+    } catch (err) { /* no head to put it in: the reveal falls back to the fade */ }
+  }
+
+  /**
+   * End the opening by opening it up from where the double click landed.
+   *
+   * Two water rings travel outward from the point -- the outer one leading, the
+   * inner one behind it -- while the splash itself is masked away by a hole that
+   * grows from the same origin, so the app underneath is what the hole reveals.
+   * The hole's edge keeps a soft shoulder and tightens as it grows, which is
+   * what keeps it reading as water rather than as a wipe.
+   *
+   * Falls back to the ordinary fade whenever the engine cannot animate a mask:
+   * a reveal that never reveals would be worse than no reveal.
+   */
+  function finishRipple(reason, point) {
+    if (finished) return
+    if (!overlay || !maskAnimatable()) { finish(reason, 'skip'); return }
+    /* Keep the clip playing underneath the expanding hole. Removing the iframe
+       at the end of the transition disposes its animation with the document. */
+    rippleActive = true
+    var at = revealPoint(point)
+    var playingFrame = frame
+    var node = teardown(reason, 'skip')
+
+    var fade = Math.max(0, Number(CFG.fadeMs) || 0)
+    var duration = Math.max(120, Number(CFG.rippleMs) || 1800)
+    var reach = revealReach(at.x, at.y)
+
+    installRippleKeyframes()
+    node.style.transition = 'none'
+    node.style.opacity = '1'
+    /* Nothing behind the hole may be clicked through the splash. */
+    node.style.pointerEvents = 'none'
+
+    /*
+     * The hole: transparent from the centre out to `outer`, then the splash.
+     * Both stops are radii in pixels, and they grow together -- the whole
+     * transparent region spreads while the black ring only ever travels
+     * outward, which is what keeps the stop order valid at every frame. The
+     * black stop is a short shoulder past the transparent one, so the moving
+     * edge stays soft; the shoulder tightens as the hole reaches the edges.
+     *
+     * `k` is the fraction of the way to `reach`, never a length: mixing the two
+     * puts the stops in the wrong order and the gradient renders as if there
+     * were no hole at all.
+     */
+    var stops = function (k) {
+      var transparent = reach * k
+      /* The soft edge must also start at zero, otherwise a large translucent
+         disk appears immediately even though the hole radius is still zero. */
+      var shoulder = Math.min(24, transparent * 0.12) * (1 - k)
+      return 'rgba(0,0,0,0) ' + transparent.toFixed(4) + 'px,'
+        + '#000 ' + (transparent + shoulder).toFixed(4) + 'px'
+    }
+    var from = 'radial-gradient(circle at ' + at.x + 'px ' + at.y + 'px, ' + stops(0) + ')'
+    var to = 'radial-gradient(circle at ' + at.x + 'px ' + at.y + 'px, ' + stops(1) + ')'
+    setMask(node.style, from)
+
+    // Keep water rings outside the mask so the reveal does not erase them.
+    var waves = document.createElement('div')
+    waves.id = 'dsh-opening-ripples'
+    waves.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none;overflow:hidden'
+    var delay = 180
+    var inner = rippleRing(at.x, at.y, reach * 2, duration, delay)
+    var outer = rippleRing(at.x, at.y, reach * 2.3, duration, 0)
+    waves.appendChild(inner)
+    waves.appendChild(outer)
+    document.body.appendChild(waves)
+    // Draw actual travelling crests rather than scaling a perfectly round border.
+    // One viewport-sized surface avoids allocating giant glowing ring layers.
+    var water = document.createElement('canvas')
+    var waterContext = null
+    var waterScale = Math.min(1.5, window.devicePixelRatio || 1)
+    var waterWidth = window.innerWidth || 1
+    var waterHeight = window.innerHeight || 1
+    try {
+      water.width = Math.ceil(waterWidth * waterScale)
+      water.height = Math.ceil(waterHeight * waterScale)
+      water.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none'
+      waterContext = water.getContext && water.getContext('2d')
+      if (waterContext) {
+        waterContext.scale(waterScale, waterScale)
+        waves.appendChild(water)
+      }
+    } catch (err) { waterContext = null }
+    outer.style.borderColor = 'rgba(185,225,255,.95)'
+    outer.style.boxShadow = '0 0 6px rgba(80,160,255,.45)'
+
+    // Gradient images do not interpolate reliably; animate pixel radii instead.
+    var raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : null
+    var start = null
+    var removed = false
+    function disposeClip() {
+      /* Detaching the document stops both same-origin and cross-origin playback
+         without calling skip(), which would hide the picture prematurely. */
+      try {
+        if (playingFrame && playingFrame.parentNode) playingFrame.parentNode.removeChild(playingFrame)
+      } catch (err) { /* final overlay cleanup remains the fallback */ }
+      playingFrame = null
+    }
+    function progress(elapsed) {
+      var t = Math.max(0, Math.min(1, elapsed / duration))
+      return t * t * (3 - 2 * t)
+    }
+      function waveOpacity(t) {
+        return Math.min(1, t / 0.1) * Math.pow(1 - t, 0.7)
+      }
+
+    function paintWave(radius, time, alpha, phase) {
+      if (!waterContext || radius <= 0 || alpha <= 0) return
+      var amplitude = Math.min(8, radius * 0.065)
+      // Bright crest, blue trough and a second fine crest form a water band.
+      for (var band = 0; band < 3; band++) {
+        var offset = band === 0 ? 0 : (band === 1 ? -7 : 5)
+        waterContext.beginPath()
+        for (var i = 0; i <= 128; i++) {
+          var angle = i * Math.PI * 2 / 128
+          var wobble = amplitude * (0.65 * Math.sin(angle * 7 - time * 0.006 + phase)
+            + 0.35 * Math.sin(angle * 11 + time * 0.004 + phase))
+          var r = Math.max(0, radius + wobble + offset * Math.min(1, radius / 30))
+          var x = at.x + Math.cos(angle) * r
+          var y = at.y + Math.sin(angle) * r
+          if (i === 0) waterContext.moveTo(x, y)
+          else waterContext.lineTo(x, y)
+        }
+        waterContext.closePath()
+        waterContext.strokeStyle = band === 1 ? 'rgba(45,125,220,' + alpha * 0.65 + ')'
+          : 'rgba(205,240,255,' + alpha * (band === 0 ? 1 : 0.5) + ')'
+        waterContext.lineWidth = band === 0 ? 2.8 : (band === 1 ? 4 : 1.2)
+        waterContext.stroke()
+      }
+    }
+
+    function draw(timestamp) {
+      if (removed) return
+      if (start === null) start = timestamp
+      var elapsed = timestamp - start
+      var k = progress(elapsed - delay)
+      setMask(node.style, 'radial-gradient(circle at ' + at.x + 'px ' + at.y + 'px, ' + stops(k) + ')')
+      inner.style.transform = 'translate(-50%,-50%) scale(' + k + ')'
+      var outerProgress = progress(elapsed)
+      outer.style.transform = 'translate(-50%,-50%) scale(' + outerProgress + ')'
+      // Share the frame clock with the mask so a delayed first frame cannot
+      // leave CSS opacity ahead of the actual wave expansion.
+      inner.style.animation = 'none'
+      outer.style.animation = 'none'
+      var innerAlpha = waveOpacity(Math.max(0, Math.min(1, (elapsed - delay) / duration)))
+      var outerAlpha = waveOpacity(Math.max(0, Math.min(1, elapsed / duration)))
+      if (waterContext) {
+        inner.style.opacity = '0'
+        outer.style.opacity = '0'
+        waterContext.clearRect(0, 0, waterWidth, waterHeight)
+        paintWave(reach * k, elapsed, innerAlpha, 0)
+        // Keep the leading wave near the inner one, visible longer on screen.
+        paintWave(reach * 1.08 * outerProgress, elapsed, outerAlpha, 1.7)
+      } else {
+        inner.style.opacity = String(innerAlpha)
+        outer.style.opacity = String(outerAlpha)
+        var bend = 50 + 3 * Math.sin(elapsed * 0.008)
+        inner.style.borderRadius = bend + '% ' + (100 - bend) + '%'
+        outer.style.borderRadius = (100 - bend) + '% ' + bend + '%'
+      }
+      if (elapsed < duration + delay) raf(draw)
+      else disposeClip()
+    }
+    if (raf) raf(draw)
+    else { setMask(node.style, to); disposeClip() }
+
+    rippleTimer = setTimeout(function () {
+      rippleTimer = 0
+      removed = true
+      disposeClip()
+      try { if (waves.parentNode) waves.parentNode.removeChild(waves) } catch (err) { /* ignore */ }
+      try { if (node.parentNode) node.parentNode.removeChild(node) } catch (err) { /* ignore */ }
+    }, duration + delay + RIPPLE_SETTLE_MS + fade)
   }
 
   /* ------------------------------- reporting -------------------------------- */
@@ -290,8 +672,24 @@
     try { document.documentElement.removeAttribute('data-dsh-opening-boot') } catch (err) { /* ignore */ }
   }
 
-  function finish(reason, via) {
-    if (finished) return
+  /**
+   * Everything both endings do, in one place: stop the clocks, drop the
+   * listeners, count the playback, take the boot style off the canvas, and
+   * announce the ending.
+   *
+   * The boot style keeps the canvas black from the first paint, so it must come
+   * off as soon as the splash is over -- a light theme would otherwise keep a
+   * black canvas behind the app. `finishRipple` calls this first and then keeps
+   * the node itself around for the reveal.
+   *
+   * The announcement belongs here rather than in `finish`, because it is part
+   * of "the opening is over", not part of "the overlay fades out": a caller
+   * waiting on `dsh:opening-complete` would otherwise wait forever whenever the
+   * reveal was the ending.
+   *
+   * @returns the overlay node, already detached from this module's state.
+   */
+  function teardown(reason, via) {
     finished = true
     stopTimers()
     for (var i = 0; i < detach.length; i++) detach[i]()
@@ -307,6 +705,17 @@
     overlay = null
     frame = null
     hint = null
+
+    try {
+      window.dispatchEvent(new CustomEvent('dsh:opening-complete', { detail: { reason: reason } }))
+    } catch (err) { /* CustomEvent unavailable: nothing to do */ }
+
+    return node
+  }
+
+  function finish(reason, via) {
+    if (finished) return
+    var node = teardown(reason, via)
     if (!node) return
 
     node.setAttribute('data-dsh-opening', 'done')
@@ -318,10 +727,6 @@
     var fade = Math.max(0, Number(CFG.fadeMs) || 0)
     if (fade > 0) setTimeout(remove, fade + 80)
     else remove()
-
-    try {
-      window.dispatchEvent(new CustomEvent('dsh:opening-complete', { detail: { reason: reason } }))
-    } catch (err) { /* CustomEvent unavailable: nothing to do */ }
   }
 
   function stopTimers() {
@@ -329,6 +734,10 @@
     if (capTimer) { clearTimeout(capTimer); capTimer = 0 }
     if (loadTimer) { clearTimeout(loadTimer); loadTimer = 0 }
     if (hintTimer) { clearTimeout(hintTimer); hintTimer = 0 }
+    if (clickTimer) { clearTimeout(clickTimer); clickTimer = 0 }
+    /* The ripple's own timer is deliberately not cleared here: it removes a node
+       that is no longer reachable from this module, and the page it reveals must
+       not be left under an overlay that nothing will ever take away. */
   }
 
   /* ------------------------------ frame wiring ------------------------------ */
@@ -349,29 +758,95 @@
       if (!messageToken || data.k !== messageToken) return
 
       if (data.type === 'ready') {
-        sendIdentity()
+        applyNamePolicy()
+        sendPrefs()
         frameReady = true
         if (Number(data.duration) > 0) frameDuration = Number(data.duration)
         log('animation reported ready', data.duration)
         armFrame(data.duration, 'message')
         return
       }
-      if (data.type === 'done') { finish(String(data.reason || 'completed'), 'message'); return }
+      if (data.type === 'done') {
+        /* A reveal in progress means the bridge stopped the animation to uncover
+           a standing screen; that completion is not the end of the opening, and
+           the reveal's own timer is what takes the overlay away. */
+        if (rippleActive) return
+        finish(String(data.reason || 'completed'), 'message')
+        return
+      }
       if (data.type === 'skip') {
         /* The parent owns the policy; the frame only reports the intent. */
         if (CFG.skippable === false) return
         if (data.how === 'click' && CFG.skipOnClick !== true) return
+        if (data.how === 'dblclick') {
+          /* Two channels can report the same gesture on a same-origin frame --
+             the bridge's message and this window's own listener -- and the first
+             one to arrive ends the opening. */
+          if (CFG.skipOnDoubleClick !== true || finished) return
+          skip('dblclick', { ripple: true, point: data.point })
+          return
+        }
         skip(data.how === 'click' ? 'click' : 'key')
       }
     })
   }
 
-  function sendIdentity() {
+  /**
+   * The origin a message to the animation is addressed to.
+   *
+   * `frame.src` is what carries the plugin's own route, so it is the honest
+   * base. A document without a readable `href` must not be allowed to throw
+   * here: that throw would be swallowed as "the account was unavailable" and
+   * the name would silently never arrive.
+   */
+  function frameTargetOrigin() {
+    try {
+      return new URL(frame.src, location.href).origin
+    } catch (err) {
+      return '*'
+    }
+  }
+
+  /**
+   * Tell the frame which of the user's switches are on.
+   *
+   * The frame cannot read them: it is served by the host and, on the Electron
+   * shell, lives on another origin from the page that owns the storage. So the
+   * gesture wiring inside the animation document -- which the host builds from
+   * its own config at serve time -- is reconciled from here, where the switches
+   * actually are. `false` is sent as plainly as `true`, so turning a switch off
+   * takes effect on the next play without a reload.
+   *
+   * A deployment that already wired the gesture keeps it: the bridge only ever
+   * adds a listener, never removes one.
+   */
+  function sendPrefs() {
+    try {
+      if (frame && frame.contentWindow) frame.contentWindow.postMessage({
+        source: 'dsh-opening-parent', type: 'prefs', k: messageToken,
+        prefs: {
+          skipOnClick: CFG.skipOnClick === true,
+          skipOnDoubleClick: CFG.skipOnDoubleClick === true,
+          skipOnAnyKey: CFG.skipOnAnyKey === true
+        }
+      }, frameTargetOrigin())
+    } catch (err) { /* A frame that cannot be told keeps the host's own wiring. */ }
+  }
+  /**
+   * Publish the name the animation shows after `ID CONFIRMED :`.
+   *
+   * A deployment that composes `revertName: true` never lets a name through,
+   * so the animation keeps its own `DEEPSEEK` and no account data reaches the
+   * frame at all.
+   */
+  function sendIdentity(label) {
+    if (label === undefined) label = identityLabel
+    if (CFG.revertName === true) label = null
     try {
       if (frame && frame.contentWindow) frame.contentWindow.postMessage({
         source: 'dsh-opening-parent', type: 'identity', k: messageToken,
-        label: identityLabel
-      }, new URL(frame.src, location.href).origin)
+        label: label
+      }, frameTargetOrigin())
     } catch (err) { /* An unavailable account must not interrupt playback. */ }
   }
 
@@ -392,10 +867,23 @@
         skip('key')
       }, true)
       if (CFG.skippable !== false && CFG.skipOnClick === true) {
-        doc.addEventListener('pointerdown', function () { skip('click') }, true)
+        doc.addEventListener('pointerdown', function () {
+          if (CFG.skipOnDoubleClick === true) return
+          skip('click')
+        }, true)
+      }
+      if (CFG.skippable !== false && CFG.skipOnDoubleClick === true) {
+        doc.addEventListener('dblclick', function (event) {
+          var point = null
+          try { point = { x: Number(event && event.clientX) || 0, y: Number(event && event.clientY) || 0 } } catch (err) { /* ignore */ }
+          skip('dblclick', { ripple: true, point: point })
+        }, true)
       }
       if (typeof w.addEventListener === 'function') {
         w.addEventListener('dsh:splash-complete', function (event) {
+          /* Same rule as the bridge's `done` message: a reveal stopped the
+             animation itself, so this completion is not the opening's end. */
+          if (rippleActive) return
           finish((event && event.detail && event.detail.reason) || 'completed')
         })
       }
@@ -481,6 +969,9 @@
   /* --------------------------------- start --------------------------------- */
 
   function start(force) {
+    /* The switches are re-read per play: a replay from the Settings page picks up
+       a change made since the page loaded. */
+    mergePrefs(readPrefs())
     if (!force && !shouldPlay()) { finished = true; clearBootStyle(); return }
     playbackStarted = false
     frameReady = false
@@ -518,13 +1009,20 @@
     log('overlay mounted, waiting for the animation')
   }
 
-  /* Public handle: lets a user (or a future settings page) replay on demand.
+  /* Public handle: lets a user (or the Settings page) replay on demand.
      `play` is intentionally unconditional -- an explicit replay must not be
      refused by `oncePerSession` or `cooldownMs`. */
   window.DSHOpening = {
     setIdentity: function (label) {
       identityLabel = typeof label === 'string' ? label : null
-      sendIdentity()
+      applyNamePolicy()
+    },
+    /* Where the Settings page pushes a switch it just wrote, so the change lands
+       on the running page instead of waiting for the next load. */
+    setPrefs: function (prefs) {
+      mergePrefs(prefs)
+      applyNamePolicy()
+      sendPrefs()
     },
     play: function () { if (!finished) return false; finished = false; detach = []; start(true); return true },
     skip: function () { skip('api') },

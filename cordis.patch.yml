@@ -26,5 +26,11 @@
         skippable: true
         # 点击画面是否也算跳过。默认 false —— 启动瞬间的误点不该把开场动画打断。
         skipOnClick: false
-        # 右下角那行 "Esc 跳过" 提示。默认 false, 放映保持干净。
+        # 双击画面跳过, 并在双击处播放水波涟漪过渡。设置页的"双击跳过"开关会覆盖这里。
+        skipOnDoubleClick: false
+        # 涟漪过渡时长 (毫秒)。1-10000。
+        rippleMs: 1800
+        # false = 双击仍可跳过, 但改为普通淡出, 不播放涟漪过渡。
+        rippleReveal: true
+        # 右下角那行跳过提示。默认 false, 放映保持干净; 开启双击跳过后文案含"双击"。
         showSkipHint: false

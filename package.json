@@ -1,6 +1,6 @@
 {
   "name": "dsh-opening-splash",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "DeepSeek Harness opening splash: plays the DSH software-opening animation full screen when the Web UI boots, then fades into the app (skippable, speed and frequency configurable)",
   "repository": {
     "type": "git",
@@ -21,7 +21,7 @@
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
-    "test": "node tests/host.mjs && node tests/browser.mjs && node tests/account.mjs"
+    "test": "node tests/host.mjs && node tests/browser.mjs && node tests/account.mjs && node tests/packaging.mjs"
   },
   "exports": {
     ".": "./lib/index.js",
@@ -38,7 +38,12 @@
   "dsh": {
     "client": {
       "platform": "web",
-      "inject": ["@deepseek-ai/dsh-api-remotes", "@deepseek-ai/dsh-client-locale"]
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings-general"
+      ]
     },
     "bundle": {
       "patch": "./cordis.patch.yml"

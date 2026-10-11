@@ -426,7 +426,11 @@ const TLEN1 = L_TEXT * (360 - 78) / 360;   // opening 78 deg
 const CORE_BIG = 33.0, CORE_SMALL = 11.0;  // white ring gap 26 deg
 
 /* ------------------------------ helpers ------------------------------ */
-const $  = (s) => document.querySelector(s);
+const elementCache = new Map();
+const $ = (selector) => {
+  if (!elementCache.has(selector)) elementCache.set(selector, document.querySelector(selector));
+  return elementCache.get(selector);
+};
 const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
 const lerp  = (a, b, t) => a + (b - a) * t;
 /** progress of a [start,end] window, 0..1, clamped */
@@ -533,6 +537,10 @@ function statusMessage(t) {
   return current ? current.v.slice(0, Math.ceil(current.v.length * p([current.f, current.end], t))) : '';
 }
 
+const dnaGroups = [...document.querySelectorAll('.dna-scroll')];
+const radarLayers = [...document.querySelectorAll('#ringG,#whiteRingG,#textRingG,#irisG,#faceG,#dotsG,.paperDisc')];
+let lastRadarTime = null;
+
 /* ------------------------------- frame ------------------------------- */
 /* ?t=<ms> renders one static frame  - used for design review and screenshots. */
 const STATIC_T = new URLSearchParams(location.search).get('t');
@@ -553,7 +561,7 @@ function render(t) {
   el.stage.style.opacity = String(clamp(paperK * 3));
   el.ghost.style.opacity = String(0.22 * paperK);
   $('#dnaBackdrop').style.opacity = String(.42 * paperK);
-  for (const group of document.querySelectorAll('.dna-scroll')) {
+  for (const group of dnaGroups) {
     group.setAttribute('transform', `translate(0 ${-((Math.max(0,t) / 1000 * 28) % DNA_PERIOD)})`);
   }
 
@@ -562,7 +570,7 @@ function render(t) {
   const aOut = easeIn(p(T.accessOut, t));
   el.access.style.opacity = String(aIn * (1 - aOut));
   const accessCount = Math.floor(ACCESS.length * p([160, 1160], t));
-  accessLetters.forEach((letter, i) => { letter.style.opacity = i < accessCount ? '1' : '0'; });
+  accessLetters.forEach((letter, i) => { const opacity = i < accessCount ? '1' : '0'; if (letter.style.opacity !== opacity) letter.style.opacity = opacity; });
 
   /* --- the whale mark draws on, then the wordmark types out --- */
   const mIn  = p(T.markIn, t);
@@ -582,7 +590,8 @@ function render(t) {
     const from = i / WORD.length, to = from + 1 / WORD.length;
     const k = clamp((wK - from) / (to - from));
     node.style.opacity = String(k);
-    node.style.display = k > 0 ? 'inline' : 'none';
+    const display = k > 0 ? 'inline' : 'none';
+    if (node.style.display !== display) node.style.display = display;
   });
 
   /* --- identification block + scan --- */
@@ -591,7 +600,8 @@ function render(t) {
   el.hud.style.opacity = String(hIn * (1 - hOut));
   el.hud.style.transform = `translateX(${lerp(-16, 0, hIn)}px)`;
   el.hudScan.style.opacity = String(clamp((1 - Math.abs(p(T.scanBar, t) - .5) * 2.4)) * hIn * (1 - hOut));
-  el.hudScan.style.left = lerp(-74, 430, easeIO(p(T.scanBar, t))) + 'px';
+  el.hudScan.style.left = '0px';
+  el.hudScan.style.transform = `translateX(${lerp(-74, 430, easeIO(p(T.scanBar, t)))}px)`;
 
   /* --- status line beside the mark --- */
   const sIn = easeOut(p(T.statusIn, t));
@@ -605,98 +615,11 @@ function render(t) {
   el.scanbar.style.opacity = showBar ? String(sAlive * (1 - hOut)) : '0';
   el.scanFill.style.width = (showBar ? lerp(0, 100, easeOut(p([T.s3[0] - 60, T.s3[0] + 560], t))) : 0) + '%';
 
-  /* Reference geometry measured from 91 native frames, 19.4-23s. */
-  const ref = t / 1000 + 7;
-  // Cubic Hermite interpolation gives continuous position and angular velocity.
-  const track = (keys, time) => {
-    if (time <= keys[0][0]) return keys[0][1];
-    const last = keys.length - 1;
-    if (time >= keys[last][0]) return keys[last][1];
-    let i = 0;
-    while (time > keys[i + 1][0]) i++;
-    const [a, av] = keys[i], [b, bv] = keys[i + 1];
-    const u = (time - a) / (b - a), d = b - a;
-    const slope = k => k === 0 ? (keys[1][1] - keys[0][1]) / (keys[1][0] - keys[0][0])
-      : k === last ? (keys[last][1] - keys[last-1][1]) / (keys[last][0] - keys[last-1][0])
-      : (keys[k+1][1] - keys[k-1][1]) / (keys[k+1][0] - keys[k-1][0]);
-    return (2*u*u*u-3*u*u+1)*av + (u*u*u-2*u*u+u)*d*slope(i)
-      + (-2*u*u*u+3*u*u)*bv + (u*u*u-u*u)*d*slope(i+1);
-  };
-  const radius = track([[19.6,800],[19.88,460],[20.12,325],[20.4,218],
-    [20.6,171.5],[20.8,142.5],[21.2,120],[21.4,118],[21.8,114.5],
-    [22.2,112],[22.6,110],[23,110]], Math.min(ref,22.6));
-  const flash = Math.max(p([R(20.98),R(21)],t)*(1-p([R(21.04),R(21.08)],t)),
-    p([R(21.10),R(21.12)],t)*(1-p([R(21.16),R(21.20)],t)));
-  const baseScale = radius * 1920 / 852 / 264;
-  const scale = baseScale + .9 * flash;
-  const rOut = easeOut(p(T.radarOut,t));
-  const closeRings = easeIO(p([R(22.6),R(22.72)],t));
-  el.radar.style.opacity = String(p([R(19.6),R(19.84)],t)*(1-rOut));
-  el.radar.style.transform = `scale(${scale})`;
-  const setTurn = (selector, angle, size=1) => {
-    const node=$(selector); node.style.transformOrigin='350px 350px';
-    node.style.transform=`rotate(${angle}deg) scale(${size})`;
-  };
-  for(const node of document.querySelectorAll('#ringG,#whiteRingG,#textRingG,#irisG,#faceG,#dotsG,.paperDisc')) {
-    node.style.filter=`blur(${flash*1.8}px)`;node.style.opacity=String(1-.7*flash);
+  const radarTime = clamp(t, R(19.6), T.radarOut[1]);
+  if (radarTime !== lastRadarTime) {
+    renderRadar(radarTime);
+    lastRadarTime = radarTime;
   }
-  const outerAngle = track([[19.6,170],[20,115],[20.4,44],[20.6,17.2],
-    [20.8,-10],[21.2,-47.8],[21.4,-60.8],[21.6,-70.8],[21.8,-78],
-    [22,-83.2],[22.2,-88],[22.6,-96],[23,-104]],ref);
-  const opening = Math.max(1.5,track([[19.6,170],[20.4,70],[20.6,63.5],[20.8,46],
-    [21.2,22.5],[21.4,14.5],[21.6,8.5],[21.8,4],[22,1.5],[23,1.5]],ref));
-  const arc = (node,radius,mid,span) => {
-    const point = deg => [350+radius*Math.cos(deg*Math.PI/180),350+radius*Math.sin(deg*Math.PI/180)];
-    const a=point(mid-span/2),b=point(mid+span/2);
-    const opposite=point(mid);
-    node.setAttribute('d', span >= 359.999
-      ? `M${a[0]} ${a[1]} A${radius} ${radius} 0 1 1 ${opposite[0]} ${opposite[1]} A${radius} ${radius} 0 1 1 ${a[0]} ${a[1]} Z`
-      : `M${a[0]} ${a[1]} A${radius} ${radius} 0 ${span>180?1:0} 1 ${b[0]} ${b[1]}`);
-    node.style.strokeDasharray='none';node.style.strokeDashoffset='0';
-  };
-  arc($('#o1'),264,180,360-opening*(1-closeRings));setTurn('#ringG',outerAngle);
-  arc($('#w1'),248,180,360-Math.max(2,opening*.65)*(1-closeRings));setTurn('#whiteRingG',outerAngle-12);
-  $('#o1').style.opacity=String(p([R(19.88),R(20.08)],t));
-  $('#w1').style.opacity=String(p([R(19.72),R(19.96)],t));
-  const morph=easeIO(p([R(21.96),R(22.06)],t));
-  const half=lerp(72,50.4,morph);
-  arc($('#t1'),96,-90,half*2);arc($('#t2'),96,90,half*2);
-  $('#t2').removeAttribute('transform');
-  // Reach horizontal gaps exactly as the satellite circles close, then stop.
-  const stopProgress = p([R(22.6),R(22.72)],t);
-  // Approach zero from below, decelerating without overshooting or reversing.
-  const centreTurn = ref < 22.6 ? 12*(ref-22.66) : -.72 * (1-stopProgress)**2;
-  setTurn('#textRingG',centreTurn,1/baseScale);
-  $('#textRingG').style.opacity=String(p([R(19.64),R(19.84)],t)*(1-.7*flash));
-  const orangeAngle=track([[19.6,-30],[20,-90],[20.4,-172.3],[20.6,-15.7-180],[20.8,-33.4-180],
-    [21.2,-59-180],[21.4,-67.3-180],[21.8,-79.7-180],[22.2,-86.4-180],
-    [22.6,-90-180],[23,-90-180]],Math.min(ref,22.6));
-  // The two orange points are diametrically opposed; unwrap their direction.
-  setTurn('#dotsG',orangeAngle+90,1/baseScale);
-  el.radarText.style.transformOrigin='350px 350px';
-  el.radarText.style.transform=`scale(${1/scale})`;
-  el.radarText.style.opacity=String(p([R(19.6),R(19.95)],t)*(1-p([R(21.8),R(22)],t)));
-  el.radarText.style.letterSpacing=lerp(6,4.9,p([R(19.6),R(20.4)],t))+'px';
-  const faceTime=Math.min(ref,22.6);
-  setTurn('#irisG',8*(faceTime-22.6));setTurn('#faceDots',-12*(faceTime-22.6));
-  for(const [id,side] of [['i1',1],['i2',-1]]) {
-    const cx=350+side*128/baseScale, r=37/baseScale;
-    const span=lerp(lerp(210,350,p([R(22.04),R(22.6)],t)),360,closeRings);
-    const start=(id==='i1'?150:-30)+90*(faceTime-22.12);
-    const point=deg=>[cx+r*Math.cos(deg*Math.PI/180),350+r*Math.sin(deg*Math.PI/180)];
-    const a=point(start),b=point(start+span),node=$('#'+id);
-    const opposite=point(start+180);
-    node.setAttribute('d',span>=359.999
-      ? `M${a[0]} ${a[1]} A${r} ${r} 0 1 1 ${opposite[0]} ${opposite[1]} A${r} ${r} 0 1 1 ${a[0]} ${a[1]} Z`
-      : `M${a[0]} ${a[1]} A${r} ${r} 0 1 1 ${b[0]} ${b[1]}`);
-    node.removeAttribute('transform');node.style.strokeDasharray='none';node.style.strokeDashoffset='0';
-    node.style.opacity=String(p([R(21.8),R(22.12)],t));
-  }
-  $('#core').setAttribute('r',String(lerp(42,11,morph)));
-  $('#core').style.opacity=String(p([R(21.8),R(21.88)],t));
-  [22.04,22.12,22.2,22.28,22.36,22.44].forEach((at,i)=>{
-    $('#f'+(i+1)).style.opacity=String(p([R(at),R(at+.12)],t));
-  });
 
   /* --- final lockup --- */
   const wIn = easeOut(p(T.welcome, t));
@@ -714,6 +637,115 @@ function render(t) {
 
   /* --- nothing after the hold --- */
   el.curtain.style.opacity = String(easeOut(p([TOTAL + HOLD, TOTAL + HOLD + 320], t)));
+}
+
+  const track = (keys, time) => {
+    if (time <= keys[0][0]) return keys[0][1];
+    const last = keys.length - 1;
+    if (time >= keys[last][0]) return keys[last][1];
+    let i = 0;
+    while (time > keys[i + 1][0]) i++;
+    const [a, av] = keys[i], [b, bv] = keys[i + 1];
+    const u = (time - a) / (b - a), d = b - a;
+    const slope = k => k === 0 ? (keys[1][1] - keys[0][1]) / (keys[1][0] - keys[0][0])
+      : k === last ? (keys[last][1] - keys[last-1][1]) / (keys[last][0] - keys[last-1][0])
+      : (keys[k+1][1] - keys[k-1][1]) / (keys[k+1][0] - keys[k-1][0]);
+    return (2*u*u*u-3*u*u+1)*av + (u*u*u-2*u*u+u)*d*slope(i)
+      + (-2*u*u*u+3*u*u)*bv + (u*u*u-u*u)*d*slope(i+1);
+  };
+
+const RADAR_KEYS_0 = [[19.6,800],[19.88,460],[20.12,325],[20.4,218],
+    [20.6,171.5],[20.8,142.5],[21.2,120],[21.4,118],[21.8,114.5],
+    [22.2,112],[22.6,110],[23,110]];
+const RADAR_KEYS_1 = [[19.6,170],[20,115],[20.4,44],[20.6,17.2],
+    [20.8,-10],[21.2,-47.8],[21.4,-60.8],[21.6,-70.8],[21.8,-78],
+    [22,-83.2],[22.2,-88],[22.6,-96],[23,-104]];
+const RADAR_KEYS_2 = [[19.6,170],[20.4,70],[20.6,63.5],[20.8,46],
+    [21.2,22.5],[21.4,14.5],[21.6,8.5],[21.8,4],[22,1.5],[23,1.5]];
+const RADAR_KEYS_3 = [[19.6,-30],[20,-90],[20.4,-172.3],[20.6,-15.7-180],[20.8,-33.4-180],
+    [21.2,-59-180],[21.4,-67.3-180],[21.8,-79.7-180],[22.2,-86.4-180],
+    [22.6,-90-180],[23,-90-180]];
+
+  const setTurn = (selector, angle, size=1) => {
+    const node=$(selector); node.style.transformOrigin='350px 350px';
+    node.style.transform=`rotate(${angle}deg) scale(${size})`;
+  };
+
+  const arc = (node,radius,mid,span) => {
+    const point = deg => [350+radius*Math.cos(deg*Math.PI/180),350+radius*Math.sin(deg*Math.PI/180)];
+    const a=point(mid-span/2),b=point(mid+span/2);
+    const opposite=point(mid);
+    setPath(node, span >= 359.999
+      ? `M${a[0]} ${a[1]} A${radius} ${radius} 0 1 1 ${opposite[0]} ${opposite[1]} A${radius} ${radius} 0 1 1 ${a[0]} ${a[1]} Z`
+      : `M${a[0]} ${a[1]} A${radius} ${radius} 0 ${span>180?1:0} 1 ${b[0]} ${b[1]}`);
+    node.style.strokeDasharray='none';node.style.strokeDashoffset='0';
+  };
+
+function setPath(node, path) {
+  if (node.getAttribute('d') !== path) node.setAttribute('d', path);
+}
+
+function renderRadar(t) {
+  /* Reference geometry measured from 91 native frames, 19.4-23s. */
+  const ref = t / 1000 + 7;
+  // Cubic Hermite interpolation gives continuous position and angular velocity.
+  const radius = track(RADAR_KEYS_0, Math.min(ref,22.6));
+  const flash = Math.max(p([R(20.98),R(21)],t)*(1-p([R(21.04),R(21.08)],t)),
+    p([R(21.10),R(21.12)],t)*(1-p([R(21.16),R(21.20)],t)));
+  const baseScale = radius * 1920 / 852 / 264;
+  const scale = baseScale + .9 * flash;
+  const rOut = easeOut(p(T.radarOut,t));
+  const closeRings = easeIO(p([R(22.6),R(22.72)],t));
+  el.radar.style.opacity = String(p([R(19.6),R(19.84)],t)*(1-rOut));
+  el.radar.style.transform = `scale(${scale})`;
+  for(const node of radarLayers) {
+    const blur = flash > 0 ? `blur(${flash*1.8}px)` : 'none';
+    if (node.style.filter !== blur) node.style.filter = blur;node.style.opacity=String(1-.7*flash);
+  }
+  const outerAngle = track(RADAR_KEYS_1,ref);
+  const opening = Math.max(1.5,track(RADAR_KEYS_2,ref));
+  arc($('#o1'),264,180,360-opening*(1-closeRings));setTurn('#ringG',outerAngle);
+  arc($('#w1'),248,180,360-Math.max(2,opening*.65)*(1-closeRings));setTurn('#whiteRingG',outerAngle-12);
+  $('#o1').style.opacity=String(p([R(19.88),R(20.08)],t));
+  $('#w1').style.opacity=String(p([R(19.72),R(19.96)],t));
+  const morph=easeIO(p([R(21.96),R(22.06)],t));
+  const half=lerp(72,50.4,morph);
+  arc($('#t1'),96,-90,half*2);arc($('#t2'),96,90,half*2);
+  $('#t2').removeAttribute('transform');
+  // Reach horizontal gaps exactly as the satellite circles close, then stop.
+  const stopProgress = p([R(22.6),R(22.72)],t);
+  // Approach zero from below, decelerating without overshooting or reversing.
+  const centreTurn = ref < 22.6 ? 12*(ref-22.66) : -.72 * (1-stopProgress)**2;
+  setTurn('#textRingG',centreTurn,1/baseScale);
+  $('#textRingG').style.opacity=String(p([R(19.64),R(19.84)],t)*(1-.7*flash));
+  const orangeAngle=track(RADAR_KEYS_3,Math.min(ref,22.6));
+  // The two orange points are diametrically opposed; unwrap their direction.
+  setTurn('#dotsG',orangeAngle+90,1/baseScale);
+  el.radarText.style.transformOrigin='350px 350px';
+  el.radarText.style.transform=`scale(${1/scale})`;
+  el.radarText.style.opacity=String(p([R(19.6),R(19.95)],t)*(1-p([R(21.8),R(22)],t)));
+  el.radarText.style.letterSpacing=lerp(6,4.9,p([R(19.6),R(20.4)],t))+'px';
+  const faceTime=Math.min(ref,22.6);
+  setTurn('#irisG',8*(faceTime-22.6));setTurn('#faceDots',-12*(faceTime-22.6));
+  for(const [id,side] of [['i1',1],['i2',-1]]) {
+    const cx=350+side*128/baseScale, r=37/baseScale;
+    const span=lerp(lerp(210,350,p([R(22.04),R(22.6)],t)),360,closeRings);
+    const start=(id==='i1'?150:-30)+90*(faceTime-22.12);
+    const point=deg=>[cx+r*Math.cos(deg*Math.PI/180),350+r*Math.sin(deg*Math.PI/180)];
+    const a=point(start),b=point(start+span),node=$('#'+id);
+    const opposite=point(start+180);
+    setPath(node,span>=359.999
+      ? `M${a[0]} ${a[1]} A${r} ${r} 0 1 1 ${opposite[0]} ${opposite[1]} A${r} ${r} 0 1 1 ${a[0]} ${a[1]} Z`
+      : `M${a[0]} ${a[1]} A${r} ${r} 0 1 1 ${b[0]} ${b[1]}`);
+    node.removeAttribute('transform');node.style.strokeDasharray='none';node.style.strokeDashoffset='0';
+    node.style.opacity=String(p([R(21.8),R(22.12)],t));
+  }
+  $('#core').setAttribute('r',String(lerp(42,11,morph)));
+  $('#core').style.opacity=String(p([R(21.8),R(21.88)],t));
+  [22.04,22.12,22.2,22.28,22.36,22.44].forEach((at,i)=>{
+    $('#f'+(i+1)).style.opacity=String(p([R(at),R(at+.12)],t));
+  });
+
 }
 
 let finished = false;
