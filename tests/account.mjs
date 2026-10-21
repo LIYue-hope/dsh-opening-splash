@@ -23,12 +23,18 @@ const PREFS_KEY = 'dsh-opening-splash:settings'
 /**
  * A stand-in for the loader's synchronous require.
  *
- * React's `useState` is the real hooks contract in miniature: a per-instance
- * cell. That is enough to execute the page as written -- first render, a switch
- * flip, and the re-render the flip asks for -- without pretending to be React.
+ * React's `useState` is the real hooks contract in miniature: a per-component
+ * cell that survives re-renders, read in call order. That is enough to execute
+ * the page as written -- first render, a switch flip, the re-render it asks for,
+ * and the state an asynchronous step writes afterwards -- without pretending to
+ * be React. The cells hang off the component identity, so re-invoking the
+ * component is exactly a re-render.
  */
 function makeRequire() {
   const calls = []
+  const cellsByComponent = new WeakMap()
+  let current = null
+  let cursor = 0
   const react = {
     /* React.createElement(type, config, ...children): an absent config must still
        be passed, exactly as the official settings pages call it. */
@@ -37,12 +43,17 @@ function makeRequire() {
       return { type, props: config ?? {}, children }
     },
     useState(initial) {
-      const cell = { value: typeof initial === 'function' ? initial() : initial }
-      const set = (next) => { cell.value = typeof next === 'function' ? next(cell.value) : next }
-      return [cell.value, set]
+      const owner = current
+      if (!owner) throw new Error('useState called outside a component render')
+      const store = cellsByComponent.get(owner) ?? []
+      const at = cursor
+      cursor += 1
+      if (!(at in store)) store[at] = typeof initial === 'function' ? initial() : initial
+      cellsByComponent.set(owner, store)
+      const set = (next) => { store[at] = typeof next === 'function' ? next(store[at]) : next }
+      return [store[at], set]
     },
   }
-  /* A switch that reports the state a click asks for, like the shared control. */
   const primitives = {
     Switch(props) {
       return { type: 'Switch', props }
@@ -54,40 +65,46 @@ function makeRequire() {
     throw new Error(`client-modules: require("${spec}") missed the module table`)
   }
   require.calls = calls
+  require.primitives = primitives
+  /** Mark `component` as the render in progress, so hooks land on it. */
+  require.begin = (component) => { current = component; cursor = 0 }
   return require
+}
+
+/** Render a component the way the slot renderer does: as a function call. */
+function renderComponent(host, component, props) {
+  host.require.begin(component)
+  return component(props)
 }
 
 /* --------------------------------- locales -------------------------------- */
 
 /**
- * A locale service that answers like the real one: `bind(ns)` resolves the key
- * out of the registered dictionary for the active language, and the language can
- * be switched to prove the copy follows it.
+ * A locale service that answers like the real one.
  *
- * Dictionaries are stored with flat dotted keys, which is how the shipped ones
- * are written and what the page's lookups assume.
+ * The real `translate` reads `dict[key]` verbatim -- it does NOT descend into
+ * nested objects -- so the stub must not either: a nested dictionary would then
+ * answer `undefined` for every dotted key and the lookup would fall silently
+ * through to English. Flattening here would hide exactly that bug.
  */
 function makeLocale() {
   const dictionaries = new Map()
   const state = { active: 'en', revision: 0 }
-  const flatten = (source, prefix, into) => {
-    for (const [key, value] of Object.entries(source)) {
-      const full = prefix ? `${prefix}.${key}` : key
-      if (value && typeof value === 'object') flatten(value, full, into)
-      else into[full] = value
-    }
-    return into
-  }
   return {
     active: state.active,
     dictionaries,
     register(ns, bundle) {
-      const flat = { en: flatten(bundle.en ?? {}, '', {}), zh: flatten(bundle.zh ?? {}, '', {}) }
-      dictionaries.set(ns, flat)
+      dictionaries.set(ns, { en: { ...(bundle.en ?? {}) }, zh: { ...(bundle.zh ?? {}) } })
       state.revision += 1
     },
+    /* Mirrors `translate`: namespace, then `common`, then the key itself. */
     bind(ns) {
-      return (key) => dictionaries.get(ns)?.[state.active]?.[key] ?? key
+      return (key, params) => {
+        const found = dictionaries.get(ns)?.[state.active]?.[key]
+        const template = typeof found === 'string' ? found : key
+        if (!params) return template
+        return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
+      }
     },
     getSnapshot: () => ({ active: state.active, revision: state.revision }),
     use(language) {
@@ -160,8 +177,62 @@ function makeStorage() {
   }
 }
 
+/**
+ * An in-memory IndexedDB, small enough to be honest about the contract the page
+ * uses: `open` (with its upgrade callback), `transaction(store, mode)`,
+ * `objectStore().put/get/delete`, and the request/transaction events.
+ *
+ * It is deliberately asynchronous, because the page's read path is: a
+ * synchronous stub would let a broken promise chain pass.
+ */
+function makeIndexedDB() {
+  const records = new Map()
+  const makeRequest = () => ({ result: undefined, error: null, onsuccess: null, onerror: null })
+  const store = {
+    put(value, key) {
+      const request = makeRequest()
+      records.set(key, value)
+      request.result = key
+      queueMicrotask(() => request.onsuccess && request.onsuccess())
+      return request
+    },
+    get(key) {
+      const request = makeRequest()
+      request.result = records.has(key) ? records.get(key) : undefined
+      queueMicrotask(() => request.onsuccess && request.onsuccess())
+      return request
+    },
+    delete(key) {
+      const request = makeRequest()
+      records.delete(key)
+      queueMicrotask(() => request.onsuccess && request.onsuccess())
+      return request
+    },
+  }
+  const database = {
+    objectStoreNames: { contains: (name) => name === 'splash' },
+    createObjectStore() {},
+    transaction() {
+      const tx = { error: null, oncomplete: null, onerror: null, onabort: null, objectStore: () => store }
+      queueMicrotask(() => queueMicrotask(() => tx.oncomplete && tx.oncomplete()))
+      return tx
+    },
+  }
+  return {
+    records,
+    open() {
+      const request = { result: database, error: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null }
+      queueMicrotask(() => {
+        if (request.onupgradeneeded) request.onupgradeneeded()
+        if (request.onsuccess) request.onsuccess()
+      })
+      return request
+    },
+  }
+}
+
 /** Build one plugin instance: window stub, context, and the pieces it wired. */
-function load({ withSlots = true, storage = makeStorage() } = {}) {
+function load({ withSlots = true, storage = makeStorage(), indexedDB = makeIndexedDB(), noIndexedDB = false } = {}) {
   let plugin
   const labels = []
   const require = makeRequire()
@@ -175,6 +246,9 @@ function load({ withSlots = true, storage = makeStorage() } = {}) {
     },
     localStorage: storage,
   }
+  /* `noIndexedDB` leaves the property off entirely, which is what a browser
+     without one answers. */
+  if (!noIndexedDB) win.indexedDB = indexedDB
   vm.runInNewContext(source, { window: win, Date, Error })
   assert.equal(plugin.inject.includes('slots'), true, 'the settings tab needs the slot service')
 
@@ -194,6 +268,9 @@ function load({ withSlots = true, storage = makeStorage() } = {}) {
     dispose() { closed = true; wake?.() },
   }
   const locale = makeLocale()
+  /* Every load starts in English: the language is one service shared by all the
+     blocks, and a block that switches it would otherwise decide for the next. */
+  locale.use('en')
   const slots = makeSlots()
   const ctx = {
     effect(fn) { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose) },
@@ -206,7 +283,7 @@ function load({ withSlots = true, storage = makeStorage() } = {}) {
     },
   }
   plugin.apply(ctx)
-  return { labels, locale, slots, pending, frames, disposers, events, win, require, push, storage, wake: () => wake?.() }
+  return { labels, locale, slots, pending, frames, disposers, events, win, require, push, storage, indexedDB, wake: () => wake?.() }
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve))
@@ -230,7 +307,7 @@ function render(host, props = {}) {
   return {
     options,
     component,
-    tree: component({ t: host.locale.bind('openingSplash.settings'), close() {}, ...props }),
+    tree: renderComponent(host, component, { t: host.locale.bind('openingSplash.settings'), close() {}, ...props }),
   }
 }
 
@@ -257,6 +334,17 @@ function switches(node, out = []) {
   if (typeof node.type === 'function' && node.props && 'checked' in node.props) out.push(node)
   for (const child of node.children ?? []) switches(child, out)
   return out
+}
+
+/** The button whose visible text is `label`, if the tree has one. */
+function findButton(node, label) {
+  if (!node || typeof node !== 'object') return null
+  if (node.type === 'button' && (node.children ?? []).includes(label)) return node
+  for (const child of node.children ?? []) {
+    const hit = findButton(child, label)
+    if (hit) return hit
+  }
+  return null
 }
 
 /** Each switch paired with the label it carries as its accessible name. */
@@ -290,7 +378,7 @@ function strings(node, out = []) {
   host.locale.use('zh')
   assert.equal(options.label(), '\u5f00\u573a\u52a8\u753b')
 
-  /* The three switches, each with its own label and hint. */
+  /* The three rows, each with its own label and hint. */
   host.locale.use('en')
   const labelled = strings(tree)
   for (const text of ['Double click to skip', 'Restore the default name', 'Use my own opening animation']) {
@@ -298,11 +386,19 @@ function strings(node, out = []) {
   }
   assert.equal(labelled.includes('Show DEEPSEEK after ID CONFIRMED, instead of the signed-in account name.'), true,
     'the default-name hint names the default it restores')
-  /* Chinese copy exists and is reachable, not just registered. */
+  /* The keys really resolve: an unresolved one would render as the key itself.
+     This is what a nested dictionary silently produced -- English in every
+     language, because the lookup fell through the whole chain to the key. */
+  assert.equal(labelled.some((text) => text.includes('.label') || text.includes('.hint')), false,
+    'no label or hint renders as its own locale key')
+
+  /* Chinese copy resolves through the same path, not just registered. */
   host.locale.use('zh')
   const zh = strings(render(host).tree)
   assert.equal(zh.includes('\u53cc\u51fb\u8df3\u8fc7'), true, 'the Chinese page has its own labels')
-  assert.equal(zh.includes('\u5c1a\u672a\u5f00\u653e'), true, 'and its own badge for the unbuilt option')
+  assert.equal(zh.includes('\u6062\u590d\u9ed8\u8ba4\u540d\u5b57'), true, 'and its own default-name label')
+  assert.equal(zh.includes('\u4f7f\u7528\u81ea\u5b9a\u4e49\u5f00\u5c4f\u52a8\u753b'), true, 'and its own upload label')
+  assert.equal(zh.includes('\u5c1a\u672a\u5f00\u653e'), false, 'the "not yet available" badge is gone with the feature landing')
   host.locale.use('en')
 
   /* Unloading the plugin (its fiber effect) withdraws the tab. */
@@ -319,12 +415,17 @@ function strings(node, out = []) {
 
   /* Everything starts off, and nothing has been written yet. */
   const rows = switchRows(tree)
-  assert.equal(rows.length, 2, 'two switches, and the unbuilt option is not one of them')
+  assert.equal(rows.length, 3, 'one switch per setting, upload included')
   assert.equal(rows[0].label, 'Double click to skip')
   assert.equal(rows[1].label, 'Restore the default name')
-  const [dbl, name] = rows.map((row) => row.control)
+  assert.equal(rows[2].label, 'Play my own opening animation')
+  const [dbl, name, uploadSwitch] = rows.map((row) => row.control)
   assert.equal(dbl.props.checked, false)
   assert.equal(name.props.checked, false)
+  assert.equal(uploadSwitch.props.checked, false)
+  /* With no file kept, the upload switch cannot be turned on: it would silently
+     play the built-in opening instead of what the user thinks they chose. */
+  assert.equal(uploadSwitch.props.disabled, true, 'no file means nothing to turn on')
   assert.equal(storage.getItem(PREFS_KEY), null, 'rendering writes nothing')
 
   /* Flipping one stores it under the key the animation half reads. */
@@ -356,20 +457,133 @@ function strings(node, out = []) {
   assert.equal(back[1].control.props.checked, true)
 }
 
-/* ------------------- the upload option is present but inert ------------------- */
+/* ---------------------- uploading an opening animation ---------------------- */
+
+/** A stand-in for the File the picker hands over. */
+function fakeFile(name, size, type) {
+  return { name, size, type, slice: () => null }
+}
+
+const tick2 = () => new Promise((resolve) => setImmediate(resolve))
+/** The picker is the file input, not one of the switches. */
+const pickerOf = (tree) => findControl(tree, 'input')
 
 {
-  const host = load()
-  const { tree } = render(host)
-  const picker = findControl(tree, 'input')
-  assert.equal(picker.props['aria-label'], 'Choose an opening animation file')
-  assert.equal(picker.props.type, 'file')
-  assert.equal(picker.props.disabled, true, 'the picker refuses input while the feature is unbuilt')
-  assert.equal(strings(tree).includes('Not yet available'), true, 'and says so')
+  const storage = makeStorage()
+  const db = makeIndexedDB()
+  const host = load({ storage, indexedDB: db })
+  const tree = render(host).tree
 
-  /* Choosing a file cannot change anything: there is nowhere for it to go. */
-  assert.equal(picker.props.onChange, undefined)
-  assert.equal(host.storage.getItem(PREFS_KEY), null)
+  const picker = pickerOf(tree)
+  assert.equal(picker.props.type, 'file', 'the row offers a real file picker')
+  assert.equal(picker.props.accept, 'video/*', 'and asks for video files')
+  assert.equal(picker.props.disabled, false, 'the picker is live now that the feature exists')
+  assert.equal(strings(tree).includes('Not yet available'), false, 'and no longer says it is unavailable')
+
+  /* Choosing a file keeps the file and turns the switch on -- one gesture, not
+     two, because a saved file nobody will play is not what was asked for. */
+  const file = fakeFile('my-intro.mp4', 4096, 'video/mp4')
+  picker.props.onChange({ target: { files: [file] } })
+  await tick2()
+  assert.equal(db.records.get('custom'), file, 'the file itself goes to the database')
+  assert.deepEqual(JSON.parse(storage.getItem('dsh-opening-splash:upload')),
+    { name: 'my-intro.mp4', size: 4096, type: 'video/mp4' }, 'and its description to the string store')
+  assert.deepEqual(storedPrefs(storage), {
+    skipOnDoubleClick: false, defaultName: false, customSplash: true,
+  }, 'saving a file turns the switch on')
+  assert.equal(host.push.at(-1).customSplash, true, 'and the running page is told')
+
+  /* The row now describes what is kept, and offers to remove it. */
+  const afterUpload = render(host).tree
+  const described = strings(afterUpload)
+  assert.equal(described.some((text) => text.includes('my-intro.mp4')), true, 'the row names the kept file')
+  assert.equal(described.some((text) => text.includes('4.0 KB')), true, 'and its size')
+  assert.equal(described.includes('Remove'), true, 'and offers to remove it')
+  assert.equal(switchRows(afterUpload)[2].control.props.disabled, false, 'the upload switch can now be turned on')
+
+  /* The switch can be turned back off without losing the file. */
+  switchRows(afterUpload)[2].control.props.onChange(false)
+  assert.equal(storedPrefs(storage).customSplash, false, 'the animation can be parked without deleting it')
+  assert.equal(db.records.has('custom'), true, 'the file is still kept')
+
+  /* Removing forgets both halves and parks the switch. */
+  const removeButton = findButton(afterUpload, 'Remove')
+  assert.ok(removeButton, 'the remove button is there')
+  removeButton.props.onClick()
+  await tick2()
+  assert.equal(db.records.has('custom'), false, 'the file is gone from the database')
+  assert.equal(storage.getItem('dsh-opening-splash:upload'), null, 'and from the description store')
+  assert.equal(storedPrefs(storage).customSplash, false, 'and the switch is off')
+}
+
+{
+  /* Refusals are reported, and none of them leaves a half-state behind. */
+  const storage = makeStorage()
+  const db = makeIndexedDB()
+  const host = load({ storage, indexedDB: db })
+  let tree = render(host).tree
+
+  /* No file chosen at all. */
+  pickerOf(tree).props.onChange({ target: { files: [] } })
+  await tick2()
+  assert.equal(strings(render(host).tree).includes('Choose a video file first.'), true, 'an empty choice says so')
+  assert.equal(db.records.size, 0, 'and stores nothing')
+
+  /* A file past the ceiling. */
+  tree = render(host).tree
+  pickerOf(tree).props.onChange({ target: { files: [fakeFile('huge.mp4', 300 * 1024 * 1024, 'video/mp4')] } })
+  await tick2()
+  const large = strings(render(host).tree)
+  assert.equal(large.some((text) => text.includes('larger than') && text.includes('200.0 MB')), true,
+    'an oversized file is refused with the ceiling named')
+  assert.equal(db.records.size, 0, 'and nothing is stored')
+
+  /* An empty file. */
+  tree = render(host).tree
+  pickerOf(tree).props.onChange({ target: { files: [fakeFile('empty.mp4', 0, 'video/mp4')] } })
+  await tick2()
+  assert.equal(strings(render(host).tree).includes('That file is empty.'), true, 'an empty file says so')
+  assert.equal(storedPrefs(storage)?.customSplash, undefined, 'and the switch is never turned on')
+
+  /* A database that refuses the write. */
+  const broken = makeIndexedDB()
+  broken.open = () => {
+    const request = { result: null, error: new Error('denied') }
+    queueMicrotask(() => request.onerror && request.onerror())
+    return request
+  }
+  const failing = load({ storage: makeStorage(), indexedDB: broken })
+  pickerOf(render(failing).tree).props.onChange({ target: { files: [fakeFile('a.mp4', 1000, 'video/mp4')] } })
+  await tick2()
+  const failed = strings(render(failing).tree)
+  assert.equal(failed.some((text) => text.includes('refused to store')), true, 'a refused write is reported')
+}
+
+{
+  /* A browser without IndexedDB cannot keep a file, and says so rather than
+   * offering a picker that would silently drop it. */
+  const host = load({ noIndexedDB: true })
+  const tree = render(host).tree
+  const said = strings(tree)
+  assert.equal(said.some((text) => text.includes('IndexedDB')), true, 'the page explains why uploads are off')
+  assert.equal(pickerOf(tree).props.disabled, true, 'and the picker refuses input')
+  assert.equal(switchRows(tree)[2].control.props.disabled, true, 'and so does its switch')
+}
+
+{
+  /* The upload's own description is validated on read: junk in the slot must not
+     make the row claim a file is kept. */
+  const storage = makeStorage()
+  storage.setItem('dsh-opening-splash:upload', '{"nonsense":true}')
+  const host = load({ storage })
+  assert.equal(strings(render(host).tree).some((text) => text.includes('Kept:')), false,
+    'a malformed description is not believed')
+
+  const broken2 = makeStorage()
+  broken2.setItem('dsh-opening-splash:upload', 'not json at all')
+  const host2 = load({ storage: broken2 })
+  assert.equal(strings(render(host2).tree).some((text) => text.includes('Kept:')), false,
+    'and unreadable JSON is not believed either')
 }
 
 /* ------------------------------ storage failures ------------------------------ */
@@ -444,10 +658,11 @@ function strings(node, out = []) {
   /* A module table with no primitives: the page falls back to a native checkbox
      rather than rendering nothing. */
   let plugin
+  let stock
   const win = {
     __ModuleLoader__: {
       load: (row) => {
-        const stock = makeRequire()
+        stock = makeRequire()
         plugin = row.factory((spec) => {
           if (spec === 'react') return stock('react')
           throw new Error('no primitives here')
@@ -456,6 +671,7 @@ function strings(node, out = []) {
     },
     DSHOpening: { setIdentity() {}, setPrefs() {} },
     localStorage: makeStorage(),
+    indexedDB: makeIndexedDB(),
   }
   vm.runInNewContext(source, { window: win, Date, Error })
   const slots = makeSlots()
@@ -472,7 +688,7 @@ function strings(node, out = []) {
   })
   slots.declare('settings.section')
   assert.equal(slots.registrations.length, 1, 'the tab still registers without the primitives')
-  const tree = slots.registrations[0].component({ t: (key) => key, close() {} })
+  const tree = renderComponent({ require: stock }, slots.registrations[0].component, { t: (key) => key, close() {} })
   const control = findControl(tree, 'input')
   assert.equal(control.props.type, 'checkbox', 'without the shared switch a native checkbox keeps the row usable')
   assert.equal(control.props['aria-label'], 'skipOnDoubleClick.label', 'and keeps its accessible name')

@@ -25,6 +25,7 @@
 
   var OVERLAY_ID = 'dsh-opening-overlay'
   var FRAME_ID = 'dsh-opening-frame'
+  var VIDEO_ID = 'dsh-opening-video'
   var HINT_ID = 'dsh-opening-hint'
   var PLAYED_PATH = '/dsh-opening/played'
   var SESSION_KEY = 'dsh-opening:session'
@@ -34,6 +35,12 @@
      Settings page that writes it may not even be loaded yet.
      Key and field names are a contract with lib/client.js -- keep them in step. */
   var PREFS_KEY = 'dsh-opening-splash:settings'
+  /* The animation the user uploaded: a Blob in IndexedDB, because a video is far
+     too large for the string store above, plus its description in that store. */
+  var UPLOAD_META_KEY = 'dsh-opening-splash:upload'
+  var DB_NAME = 'dsh-opening-splash'
+  var DB_STORE = 'splash'
+  var BLOB_KEY = 'custom'
   /* Slack after the animation's own runtime before the overlay is taken away,
      for the case where nothing inside the frame can be observed. The animation
      fades its curtain in over its last 320 ms, so this stays invisible. */
@@ -47,6 +54,11 @@
 
   var overlay = null
   var frame = null
+  /* The element the reveal's rings are centred on and offset by: the frame for
+     the built-in animation, the video for an uploaded one. */
+  var openingView = null
+  /* The Blob URL of an uploaded animation, revoked the moment it is over. */
+  var objectUrl = ''
   var hint = null
   var finished = false
   var playbackStarted = false
@@ -72,7 +84,34 @@
   /* A reveal is running: the animation has been stopped on purpose so the hole
      uncovers a standing screen, and its completion is not the opening's end. */
   var rippleActive = false
+  var canvasTimer = 0
   var detach = []
+
+  /* Read the host's painted surface rather than guessing its light/dark hex.
+     The boot panel keeps its computed background even while hidden by our
+     boot guard, and is available before the main app has finished mounting. */
+  function hostCanvasColor() {
+    if (typeof window.getComputedStyle !== 'function') return ''
+    var root = document.getElementById('root')
+    var nodes = [root,
+      document.querySelector && document.querySelector('[data-dsh-boot]')]
+    for (var i = 0; i < nodes.length; i++) {
+      if (!nodes[i]) continue
+      try {
+        var color = window.getComputedStyle(nodes[i]).backgroundColor
+        if (color && color !== 'transparent' && !/^rgba?\([^)]*(?:,|\/)\s*0(?:\.0+)?\)$/.test(color)) return color
+      } catch (err) { /* the next surface may still be available */ }
+    }
+    return ''
+  }
+
+  function syncCanvasColor() {
+    var color = hostCanvasColor()
+    if (!color) return
+    if (overlay) overlay.style.backgroundColor = color
+    if (openingView) openingView.style.backgroundColor = color
+    try { document.documentElement.style.setProperty('--dsh-opening-canvas', color) } catch (err) { /* old DOM */ }
+  }
 
   /* ------------------------- the user's own settings ------------------------ */
 
@@ -99,6 +138,162 @@
     if (!prefs) return
     if (typeof prefs.skipOnDoubleClick === 'boolean') CFG.skipOnDoubleClick = prefs.skipOnDoubleClick
     if (typeof prefs.defaultName === 'boolean') CFG.revertName = prefs.defaultName
+    if (typeof prefs.customSplash === 'boolean') CFG.customSplash = prefs.customSplash
+  }
+
+  /* ---------------------------- the uploaded animation ---------------------------- */
+
+  /** Is there an uploaded animation to play? */
+  function wantsCustomSplash() {
+    if (CFG.customSplash !== true) return false
+    try {
+      var raw = localStorage.getItem(UPLOAD_META_KEY)
+      var meta = raw ? JSON.parse(raw) : null
+      return Boolean(meta && typeof meta === 'object' && typeof meta.name === 'string')
+    } catch (err) {
+      return false
+    }
+  }
+
+  /**
+   * The stored Blob, or `null`.
+   *
+   * IndexedDB is asynchronous, so this is the one step of the boot that cannot
+   * be done before the first paint. Everything it can fail at -- no database
+   * API, a refused open, a missing record, a corrupt one -- answers `null`, and
+   * the caller falls back to the built-in animation.
+   */
+  function readUploadBlob() {
+    return new Promise(function (resolve) {
+      var request
+      try {
+        var factory = window.indexedDB
+        if (!factory || typeof factory.open !== 'function') { resolve(null); return }
+        request = factory.open(DB_NAME, 1)
+      } catch (err) { resolve(null); return }
+      request.onupgradeneeded = function () {
+        try {
+          var db = request.result
+          if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE)
+        } catch (err) { /* the error handler below reports it */ }
+      }
+      request.onerror = function () { resolve(null) }
+      request.onsuccess = function () {
+        var db = request.result
+        try {
+          var get = db.transaction(DB_STORE, 'readonly').objectStore(DB_STORE).get(BLOB_KEY)
+          get.onsuccess = function () { resolve(get.result || null) }
+          get.onerror = function () { resolve(null) }
+        } catch (err) { resolve(null) }
+      }
+    })
+  }
+
+  /**
+   * A URL for the uploaded Blob, or `''` when the platform refuses one.
+   *
+   * `window.URL` first, then the bare global: the node shims these tests run on
+   * expose the API on the window object rather than as a global, and the two
+   * spellings are the same object in a browser.
+   */
+  function objectUrlApi() {
+    try {
+      if (window.URL && typeof window.URL.createObjectURL === 'function') return window.URL
+    } catch (err) { /* ignore */ }
+    try {
+      if (typeof URL !== 'undefined' && URL && typeof URL.createObjectURL === 'function') return URL
+    } catch (err) { /* ignore */ }
+    return null
+  }
+
+  /** A URL for the uploaded Blob, or `''` when the platform refuses one. */
+  function urlFor(blob) {
+    var api = objectUrlApi()
+    if (!api) return ''
+    try {
+      return api.createObjectURL(blob)
+    } catch (err) {
+      return ''
+    }
+  }
+
+  /** Release a Blob URL; a leak here pins the whole video in memory. */
+  function releaseUrl() {
+    if (!objectUrl) return
+    var api = objectUrlApi()
+    try { if (api) api.revokeObjectURL(objectUrl) } catch (err) { /* ignore */ }
+    objectUrl = ''
+  }
+
+  /**
+   * Play the user's own animation.
+   *
+   * It is a plain `<video>` in the overlay, so it inherits every gesture the
+   * built-in animation has -- Escape, the single and double click, the hint, the
+   * watchdog and the ripple reveal -- because all of those are wired on the
+   * overlay and this window, not inside the frame. What it does not have is a
+   * frame to ask, so its own events supply the ending: `loadeddata` arms the
+   * clock from the media duration, `ended` completes it.
+   *
+   * @returns whether the custom animation was started at all.
+   */
+  function playCustomSplash() {
+    return readUploadBlob().then(function (blob) {
+      if (finished) return true
+      if (!blob) { log('custom splash: nothing stored'); return false }
+      var src = urlFor(blob)
+      if (!src) { log('custom splash: no object URL'); return false }
+
+      objectUrl = src
+      var video = document.createElement('video')
+      video.id = VIDEO_ID
+      video.setAttribute('data-dsh-opening-view', 'video')
+      video.setAttribute('aria-label', 'DeepSeek Harness opening animation')
+      /* Muted is what makes autoplay allowed without a gesture: an opening that
+         needs a click to start is not an opening. Uploaded audio is not part of
+         the contract, and a muted attribute is the one every engine honours. */
+      video.muted = true
+      video.defaultMuted = true
+      video.setAttribute('muted', '')
+      video.playsInline = true
+      video.setAttribute('playsinline', '')
+      video.autoplay = true
+      video.preload = 'auto'
+      video.style.cssText = 'display:block;width:100%;height:100%;margin:0;padding:0;'
+        + 'border:0;background:#0b0b0b;object-fit:contain;pointer-events:none'
+      video.src = src
+
+      overlay.appendChild(video)
+      openingView = video
+      syncCanvasColor()
+
+      on(video, 'loadeddata', function () {
+        if (finished) return
+        log('custom splash: media ready', video.duration)
+        armFrame(Number(video.duration) > 0 ? Number(video.duration) * 1000 : 0, 'video')
+      })
+      on(video, 'ended', function () { if (!finished) finish('completed', 'video') })
+      /* A codec the engine cannot decode, or a file that stopped mid-read: the
+         animation is over, and the page must not be left behind it. */
+      on(video, 'error', function () {
+        if (finished) return
+        log('custom splash: media failed')
+        finish('media-error', 'video')
+      })
+
+      var playing = video.play()
+      if (playing && typeof playing.catch === 'function') {
+        /* Autoplay can still be refused (a strict policy, a battery saver). The
+           opening then ends rather than holding a black screen. */
+        playing.catch(function () {
+          if (finished) return
+          log('custom splash: autoplay refused')
+          finish('autoplay-blocked', 'video')
+        })
+      }
+      log('custom splash: playing the uploaded animation')
+      return true
+    })
   }
 
   /**
@@ -192,8 +387,10 @@
   /* Build and attach the overlay. Runs while the parser may still be inside
      <head>, so `document.body` can legitimately not exist yet: in that case the
      overlay hangs off <html> (it is position:fixed, so it paints identically)
-     and is moved into <body> once the body exists. */
-  function build() {
+     and is moved into <body> once the body exists.
+     `view` picks what fills it: the built-in animation in a frame, or the
+     video the user uploaded. */
+  function build(view) {
     /* Arm the boot style even if this loader was reached by a path that did not
        set it (a hand-added tag, a test harness), so the first paint is covered. */
     try { document.documentElement.setAttribute('data-dsh-opening-boot', '') } catch (err) { /* ignore */ }
@@ -216,19 +413,8 @@
       'pointer-events:auto',
       'transition:opacity ' + Math.max(0, Number(CFG.fadeMs) || 0) + 'ms ease'
     ].join(';')
-
-    frame = document.createElement('iframe')
-    frame.id = FRAME_ID
-    frame.title = 'DeepSeek Harness opening'
-    frame.setAttribute('scrolling', 'no')
-    frame.setAttribute('frameborder', '0')
-    frame.setAttribute('allowtransparency', 'false')
-    frame.style.cssText = 'display:block;width:100%;height:100%;margin:0;padding:0;border:0;background:#0b0b0b'
-    /* The token rides along in the URL; the frame echoes it on every message. */
-    messageToken = String(Math.random()).slice(2) + String(Date.now())
-    var splashUrl = resolveUrl(CFG.splashUrl || '/dsh-opening/splash.html')
-    frame.src = splashUrl + (splashUrl.indexOf('?') === -1 ? '?' : '&') + 'k=' + encodeURIComponent(messageToken)
-    overlay.appendChild(frame)
+    syncCanvasColor()
+    canvasTimer = setInterval(syncCanvasColor, 250)
 
     /* The hint is opt-in: the default presentation is clean. */
     if (CFG.showSkipHint === true) {
@@ -246,7 +432,7 @@
         'transition:opacity .8s ease',
         'pointer-events:none',
         'user-select:none',
-        'z-index:1'
+        'z-index:2'
       ].join(';')
       /* "Esc skip" / "double click or Esc skip", in Chinese, written as \u escapes
          so this file stays ASCII. The hint names the gesture the user actually
@@ -257,6 +443,11 @@
       overlay.appendChild(hint)
     }
 
+    /* What fills the overlay, and therefore what the reveal is measured
+       against: the built-in animation in its frame, or the uploaded video. */
+    if (view === 'video') buildVideoView()
+    else buildFrameView()
+
     mount()
     /* The hint arrives late so the opening reads as a film, not as a dialog. */
     if (hint) {
@@ -264,6 +455,38 @@
         if (hint) hint.style.opacity = '.72'
       }, Math.min(1800, Math.max(600, (Number(CFG.durationMs) || 20000) / 12)))
     }
+  }
+
+  /** The built-in animation: this plugin's own page, in a frame. */
+  function buildFrameView() {
+    frame = document.createElement('iframe')
+    frame.id = FRAME_ID
+    frame.title = 'DeepSeek Harness opening'
+    frame.setAttribute('scrolling', 'no')
+    frame.setAttribute('frameborder', '0')
+    frame.setAttribute('allowtransparency', 'true')
+    /* The animation has no controls. Route clicks to the parent document so
+       double click works even when a cross-origin bridge cannot report it. */
+    frame.style.cssText = 'display:block;width:100%;height:100%;margin:0;padding:0;border:0;background:#0b0b0b;pointer-events:none'
+    /* The token rides along in the URL; the frame echoes it on every message. */
+    messageToken = String(Math.random()).slice(2) + String(Date.now())
+    var splashUrl = resolveUrl(CFG.splashUrl || '/dsh-opening/splash.html')
+    frame.src = splashUrl + (splashUrl.indexOf('?') === -1 ? '?' : '&') + 'k=' + encodeURIComponent(messageToken)
+    openingView = frame
+    overlay.appendChild(frame)
+    syncCanvasColor()
+  }
+
+  /**
+   * The uploaded animation: a video element, added once its Blob is in hand.
+   *
+   * Nothing is appended here because the Blob arrives asynchronously; the
+   * caller appends what `playCustomSplash` builds. `openingView` is set there
+   * too, so the reveal has something to centre on.
+   */
+  function buildVideoView() {
+    /* A placeholder would flash before the media appears, so the black overlay
+       simply stays until the video is appended. */
   }
 
   function mount() {
@@ -380,11 +603,14 @@
       x = Number(point.x)
       y = Number(point.y)
       try {
-        if (frame && typeof frame.getBoundingClientRect === 'function') {
-          var rect = frame.getBoundingClientRect()
+        /* Whichever view is playing reports its own offset: the frame for the
+           built-in animation, the video for an uploaded one. */
+        var view = openingView || frame
+        if (view && typeof view.getBoundingClientRect === 'function') {
+          var rect = view.getBoundingClientRect()
           if (rect) { x += Number(rect.left) || 0; y += Number(rect.top) || 0 }
         }
-      } catch (err) { /* an unmeasurable frame still reveals from the right spot */ }
+      } catch (err) { /* an unmeasurable view still reveals from the right spot */ }
     }
     return { x: x, y: y }
   }
@@ -691,6 +917,8 @@
    */
   function teardown(reason, via) {
     finished = true
+    clearInterval(canvasTimer)
+    canvasTimer = 0
     stopTimers()
     for (var i = 0; i < detach.length; i++) detach[i]()
     detach = []
@@ -704,7 +932,11 @@
     var node = overlay
     overlay = null
     frame = null
+    openingView = null
     hint = null
+    /* The uploaded animation's Blob URL is released with the play that made it:
+       holding one pins the whole file in memory for the life of the page. */
+    releaseUrl()
 
     try {
       window.dispatchEvent(new CustomEvent('dsh:opening-complete', { detail: { reason: reason } }))
@@ -979,13 +1211,49 @@
     lastArmVia = ''
     capDeadline = 0
 
-    build()
+    /*
+     * The uploaded animation is a Blob, and reading it is asynchronous -- the
+     * only step of the boot that cannot be done before the first paint. The
+     * overlay is raised either way, so nothing flashes through while the
+     * database is read; if the read comes back empty the built-in animation is
+     * mounted instead, which is the honest fallback for "the file is gone".
+     */
+    var custom = wantsCustomSplash()
+    build(custom ? 'video' : 'frame')
     if (!overlay) return
 
-    /* Registered before the frame can possibly load, so no message is missed. */
+    if (!custom) { armOpening(); return }
+    playCustomSplash().then(function (started) {
+      if (finished) return
+      if (started) {
+        /* The gestures are wired whichever animation is in the overlay: that is
+           what makes Escape, the single click and the double click with its
+           ripple work on an uploaded file exactly as they do on the built-in
+           one. Wiring happens after the media is mounted, because the reveal is
+           centred on it. */
+        armOpening()
+        return
+      }
+      log('custom splash unavailable; playing the built-in opening')
+      buildFrameView()
+      armOpening()
+    }).catch(function () {
+      if (finished) return
+      buildFrameView()
+      armOpening()
+    })
+  }
+
+  /** Wire the ending of whichever animation is now in the overlay. */
+  function armOpening() {
+    if (finished || !overlay) return
+
+    /* Registered before the frame can possibly load, so no message is missed.
+       An uploaded video has no frame to hear from, and posting into a null one
+       is already guarded, so this stays unconditional. */
     wireFrameMessages()
 
-    /* This watchdog covers one thing only: the document never arriving at all.
+    /* This watchdog covers one thing only: the animation never arriving at all.
        It is deliberately not a "has the animation started?" deadline -- across
        origins nothing else is observable, and treating silence as failure is
        what previously cut the opening short. Once `load` fires, the animation's
@@ -995,14 +1263,16 @@
       if (!finished) finish('load-timeout', 'watchdog')
     }, loadTimeout)
 
-    try {
-      frame.addEventListener('load', onFrameLoad)
-    } catch (err) {
-      /* Very old engines: fall back to polling and the duration alone. */
-      pollTimer = setInterval(function () {
-        if (finished) return
-        if (frameReportsReady() || frameIsDone()) { clearInterval(pollTimer); pollTimer = 0; onFrameLoad() }
-      }, 150)
+    if (frame) {
+      try {
+        frame.addEventListener('load', onFrameLoad)
+      } catch (err) {
+        /* Very old engines: fall back to polling and the duration alone. */
+        pollTimer = setInterval(function () {
+          if (finished) return
+          if (frameReportsReady() || frameIsDone()) { clearInterval(pollTimer); pollTimer = 0; onFrameLoad() }
+        }, 150)
+      }
     }
 
     wireSkip()

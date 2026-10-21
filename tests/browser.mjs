@@ -196,17 +196,92 @@ function makeStorage() {
   }
 }
 
+/**
+ * An in-memory IndexedDB, as wide as the loader's read path uses it.
+ *
+ * Asynchronous on purpose: the loader's read is a promise chain, and a
+ * synchronous stub would let a broken one pass.
+ */
+function makeIndexedDB(initial = {}) {
+  const records = new Map(Object.entries(initial))
+  const request = (fill) => {
+    const r = { result: undefined, error: null, onsuccess: null, onerror: null }
+    queueMicrotask(() => { fill(r); if (r.onsuccess) r.onsuccess() })
+    return r
+  }
+  const store = {
+    get: (key) => request((r) => { r.result = records.has(key) ? records.get(key) : undefined }),
+    put: (value, key) => request((r) => { records.set(key, value); r.result = key }),
+    delete: (key) => request((r) => { records.delete(key) }),
+  }
+  const db = {
+    objectStoreNames: { contains: (name) => name === 'splash' },
+    createObjectStore() {},
+    transaction() {
+      const tx = { error: null, oncomplete: null, onerror: null, onabort: null, objectStore: () => store }
+      queueMicrotask(() => queueMicrotask(() => tx.oncomplete && tx.oncomplete()))
+      return tx
+    },
+  }
+  return {
+    records,
+    open() {
+      const r = { result: db, error: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null }
+      queueMicrotask(() => {
+        if (r.onupgradeneeded) r.onupgradeneeded()
+        if (r.onsuccess) r.onsuccess()
+      })
+      return r
+    },
+  }
+}
+
+/**
+ * The minimal `<video>` the custom-animation path drives.
+ *
+ * `play()` resolves or rejects on demand, so both the ordinary start and a
+ * refused autoplay can be exercised.
+ */
+function makeVideoShim() {
+  const node = makeNode('video')
+  node.id = 'dsh-opening-video'
+  node.paused = true
+  node.duration = 12
+  node.playCalls = 0
+  node.play = () => { node.playCalls += 1; return node._playResult || Promise.resolve() }
+  node._playResult = null
+  node.getBoundingClientRect = () => ({ left: 0, top: 0, right: 1440, bottom: 810, width: 1440, height: 810 })
+  /* Public vars the loader assigns, so the checks can read them back. */
+  node.muted = false
+  node.playsInline = false
+  node.autoplay = false
+  node.preload = ''
+  node.src = ''
+  return node
+}
+
 /** Run one fresh instance of the browser half, as the served prelude would.
  *  `crossOrigin` models the Electron shell: the frame document lives on another
  *  origin, so reading any property off `contentWindow` throws while the
  *  reference itself still compares equal -- the frame can only postMessage.
  *  `sharedSession` / `sharedLocal` reuse one storage area across runs, which is
  *  how a real reload behaves; `beforeFactory` runs before the loader does, so
- *  pre-set globals can be tested. */
-function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigin = false, sharedSession, sharedLocal, beforeFactory, masks = false, noHref = false } = {}) {
+ *  pre-set globals can be tested.
+ *  `uploads` seeds the animation database, and `noIndexedDB` leaves the API off
+ *  the window entirely, which is what a browser without one answers. */
+function run({
+  config = {}, search = '', hash = '', origin = 'http:', crossOrigin = false,
+  sharedSession, sharedLocal, beforeFactory, masks = false, noHref = false,
+  uploads = null, noIndexedDB = false, playRefused = false,
+  bootColor = null,
+} = {}) {
   const document = makeDocument()
+  const bootPanel = bootColor ? makeNode('div') : null
+  if (bootPanel) document.querySelector = (selector) => selector === '[data-dsh-boot]' ? bootPanel : null
   /* The proxy needs the parent window to deliver into, so it is built after. */
   let frameWindow = null
+  let videoNode = null
+  const objectUrls = []
   const window = {
     __DSH_OPENING__: Object.assign({ splashUrl: '/dsh-opening/splash.html', durationMs: 20250 }, config),
     innerWidth: 1440,
@@ -228,7 +303,24 @@ function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigi
     },
     sessionStorage: sharedSession || makeStorage(),
     localStorage: sharedLocal || makeStorage(),
+    getComputedStyle: (node) => ({ backgroundColor: node === bootPanel ? bootColor : 'transparent' }),
   }
+  if (uploads) {
+    /* An upload leaves BOTH halves behind: the file in the database and its
+       description in the string store. Seeding only one is exactly the
+       half-state the loader refuses to play, so the shim seeds both. */
+    window.indexedDB = makeIndexedDB({ custom: uploads })
+    try {
+      window.localStorage.setItem('dsh-opening-splash:upload',
+        JSON.stringify({ name: uploads.name || 'uploaded.mp4', size: uploads.size || 0, type: uploads.type || '' }))
+    } catch (error) { /* the checks that need this supply their own storage */ }
+  } else if (!noIndexedDB) window.indexedDB = makeIndexedDB()
+  /* Blob URLs: created for a stored animation, and released when it is over. */
+  window.URL = {
+    createObjectURL: (blob) => { const url = 'blob:shim/' + objectUrls.length; objectUrls.push({ url, blob, revoked: false }); return url },
+    revokeObjectURL: (url) => { const entry = objectUrls.find((e) => e.url === url); if (entry) entry.revoked = true },
+  }
+  window.CSS = { supports: (prop) => Boolean(masks) && (prop === 'mask-image' || prop === '-webkit-mask-image') }
   frameWindow = crossOrigin
     ? makeBlockedWindow((data) => window.dispatch('message', { source: frameWindow, data }))
     : makeFrameWindow()
@@ -239,9 +331,17 @@ function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigi
   if (noHref) delete location.href
   if (beforeFactory) beforeFactory(window)
 
-  /* createElement('iframe') hands back a node whose contentWindow is the stub. */
+  /* createElement hands back the element the loader expects: a frame whose
+     contentWindow is the stub, or the video the uploaded animation plays in.
+     The loader creates the video asynchronously, well after this override is
+     installed, so a run that plays one really does get this node. */
   const realCreate = document.createElement.bind(document)
   document.createElement = (tag) => {
+    if (String(tag).toLowerCase() === 'video') {
+      if (!videoNode) videoNode = makeVideoShim()
+      if (playRefused) videoNode._playResult = Promise.reject(new Error('autoplay refused'))
+      return videoNode
+    }
     const node = realCreate(tag)
     if (String(tag).toLowerCase() === 'iframe') {
       node.contentWindow = frameWindow
@@ -298,7 +398,11 @@ function run({ config = {}, search = '', hash = '', origin = 'http:', crossOrigi
     CSS, requestAnimationFrameShim,
   )
 
-  return { window, document, frameWindow, timers, fireTimeouts, flushFrames, beacons }
+  return {
+    window, document, frameWindow, timers, fireTimeouts, flushFrames, beacons,
+    objectUrls,
+    get video() { return videoNode },
+  }
 }
 
 const find = (doc, id) => doc.getElementById(id)
@@ -893,6 +997,23 @@ function holeRadius(r) {
   check('and the ending is announced exactly once',
     JSON.stringify(completion) === JSON.stringify(['dblclick']), completion)
 }
+{
+  /* On Electron, a cross-origin iframe would swallow mouse events if it were
+     hit-testable. The parent must receive the gesture without bridge delivery. */
+  const r = run({ config: { skipOnDoubleClick: true }, crossOrigin: true, masks: true })
+  const frame = find(r.document, 'dsh-opening-frame')
+  check('the cross-origin animation leaves mouse hit testing to the parent',
+    frame.style.cssText.includes('pointer-events:none') && frame.getAttribute('allowtransparency') === 'true')
+  doubleClick(r, { x: 260, y: 180 })
+  check('the parent double click reveals without a frame message', rings(r).length === 2)
+}
+{
+  const color = 'rgb(248, 248, 248)'
+  const r = run({ bootColor: color })
+  check('the host canvas color fills the opening margins', overlayStyle(r).backgroundColor === color)
+  check('the transparent animation frame uses that exact host color',
+    find(r.document, 'dsh-opening-frame').style.backgroundColor === color)
+}
 
 {
   /* A host that turned the reveal off still honours the gesture, plainly. */
@@ -1126,6 +1247,130 @@ console.log('the frame bridge, driven as the browser drives it')
   noHref.window.DSHOpening.setIdentity('Alice')
   check('a document without href still reaches the frame',
     noHrefSent.some((data) => data.type === 'identity'), noHrefSent)
+}
+
+/* ---------------------- the animation the user uploaded ---------------------- */
+
+console.log('the uploaded opening animation')
+{
+  /* Nothing is uploaded: the built-in animation plays, as it always did. */
+  const plain = run({ sharedLocal: prefsStorage({ customSplash: true }) })
+  check('the switch alone does not conjure an animation', find(plain.document, 'dsh-opening-frame') !== null)
+  check('and no video is created', plain.video === null)
+}
+{
+  /* The switch is off: a stored animation stays stored. */
+  const off = run({ uploads: { name: 'mine.mp4', size: 10, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: false }) })
+  check('a stored animation does not play while the switch is off', find(off.document, 'dsh-opening-frame') !== null)
+  check('and no video is created for it', off.video === null)
+}
+{
+  /* Both in place: the video plays instead of the built-in animation. */
+  const blob = { name: 'mine.mp4', size: 4096, type: 'video/mp4' }
+  const r = run({ uploads: blob, sharedLocal: prefsStorage({ customSplash: true }) })
+  /* The Blob is read asynchronously, so the video appears a microtask later. */
+  await new Promise((resolve) => setImmediate(resolve))
+  const video = r.video
+  check('an uploaded animation plays in place of the built-in one', video !== null)
+  check('the built-in frame is not mounted as well', find(r.document, 'dsh-opening-frame') === null)
+  check('the overlay holds the video', find(r.document, OVERLAY_ID).children.includes(video))
+  check('the video is fed a Blob URL of the stored file',
+    r.objectUrls.length === 1 && r.objectUrls[0].blob === blob && video.src === r.objectUrls[0].url, video.src)
+  check('the video is muted, so autoplay is allowed without a gesture', video.muted === true)
+  check('the video is inline, for the desktop shell', video.playsInline === true)
+  check('playback was actually started', video.playCalls === 1)
+  check('the watchdog is armed while the media is still loading',
+    r.timers.timeouts.some((t) => t.ms === 6000))
+}
+{
+  /* The video's own events drive the ending, exactly as the frame's do. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }) })
+  await new Promise((resolve) => setImmediate(resolve))
+  const video = r.video
+  const done = []
+  r.window.addEventListener('dsh:opening-complete', (event) => done.push(event.detail.reason))
+
+  /* Media ready: the clock is armed from the media's own duration. */
+  video.dispatch('loadeddata', {})
+  check('the media duration arms the ending', r.timers.timeouts.some((t) => Math.round(t.ms) >= 12000 && t.ms < 13000),
+    r.timers.timeouts.map((t) => t.ms))
+
+  /* Playing through completes it, and the Blob URL is released. */
+  video.dispatch('ended', {})
+  check('the animation completes when the media ends', JSON.stringify(done) === JSON.stringify(['completed']))
+  check('the upload is reported as a video ending', r.beacons.some((url) => url.includes('via=video')))
+  check('the Blob URL is released, so the file is not pinned in memory', r.objectUrls[0].revoked === true)
+}
+{
+  /* Every gesture the built-in animation has, the uploaded one has too: they are
+     wired on the overlay, not inside a frame. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }), config: { skipOnDoubleClick: true }, masks: true })
+  await new Promise((resolve) => setImmediate(resolve))
+  check('a double click ends the uploaded animation', find(r.document, OVERLAY_ID) !== null)
+  doubleClick(r, { x: 200, y: 150 })
+  check('and plays the same ripple reveal', rings(r).length === 2)
+  check('with the hole centred on the double click',
+    overlayStyle(r).maskImage.includes('circle at 200px 150px'), overlayStyle(r).maskImage)
+  check('the ending is reported as the double click', r.beacons.some((url) => url.includes('reason=dblclick')))
+}
+{
+  /* Escape, on the same run shape. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }) })
+  await new Promise((resolve) => setImmediate(resolve))
+  const done = []
+  r.window.addEventListener('dsh:opening-complete', (event) => done.push(event.detail.reason))
+  r.window.dispatch('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} })
+  check('Escape ends the uploaded animation', JSON.stringify(done) === JSON.stringify(['key']))
+  check('and reports the key as the reason', r.beacons.some((url) => url.includes('reason=key')))
+}
+{
+  /* A click, when it is switched on. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }), config: { skipOnClick: true } })
+  await new Promise((resolve) => setImmediate(resolve))
+  const done = []
+  r.window.addEventListener('dsh:opening-complete', (event) => done.push(event.detail.reason))
+  r.window.dispatch('pointerdown', {})
+  check('a click ends the uploaded animation when enabled', JSON.stringify(done) === JSON.stringify(['click']))
+}
+{
+  /* Autoplay refused: the opening ends rather than holding a black screen. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }), playRefused: true })
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+  check('a refused autoplay ends the opening', r.beacons.some((url) => url.includes('reason=autoplay-blocked')))
+}
+{
+  /* A codec the engine cannot decode. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }) })
+  await new Promise((resolve) => setImmediate(resolve))
+  r.video.dispatch('error', {})
+  check('a media error ends the opening', r.beacons.some((url) => url.includes('reason=media-error')))
+}
+{
+  /* The switch on, but the file gone: the built-in animation is the fallback,
+     rather than an overlay that never ends. */
+  const r = run({ sharedLocal: prefsStorage({ customSplash: true }), noIndexedDB: true })
+  await new Promise((resolve) => setImmediate(resolve))
+  check('a missing database falls back to the built-in animation', find(r.document, 'dsh-opening-frame') !== null)
+  check('and no video is created', r.video === null)
+}
+{
+  /* Description present, file absent. */
+  const r = run({ sharedLocal: prefsStorage({ customSplash: true }) })
+  await new Promise((resolve) => setImmediate(resolve))
+  check('an empty database falls back to the built-in animation', find(r.document, 'dsh-opening-frame') !== null)
+}
+{
+  /* Replaying an uploaded animation builds a fresh video and URL. */
+  const r = run({ uploads: { name: 'mine.mp4', size: 4096, type: 'video/mp4' }, sharedLocal: prefsStorage({ customSplash: true }) })
+  await new Promise((resolve) => setImmediate(resolve))
+  const first = r.video
+  r.window.DSHOpening.skip()
+  check('the uploaded animation can be skipped', r.window.DSHOpening.isPlaying() === false)
+  r.window.DSHOpening.play()
+  await new Promise((resolve) => setImmediate(resolve))
+  check('replaying plays the uploaded animation again', r.video === first && first.playCalls >= 1)
+  check('with a fresh Blob URL', r.objectUrls.length === 2 && r.objectUrls[0].revoked === true)
 }
 
 console.log(failures === 0 ? '\nALL BROWSER-HALF CHECKS PASSED' : `\n${failures} BROWSER-HALF CHECK(S) FAILED`)

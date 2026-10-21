@@ -70,7 +70,10 @@ assert.equal(plugin.inject.includes('slots'), true,
 /* And with them present, the settings page really does use the shared switch. */
 {
   let registered = null
-  const react = { createElement: (type, config, ...children) => ({ type, props: config ?? {}, children }), useState: (v) => [typeof v === 'function' ? v() : v, () => {}] }
+  const react = {
+    createElement: (type, config, ...children) => ({ type, props: config ?? {}, children }),
+    useState: (v) => [typeof v === 'function' ? v() : v, () => {}],
+  }
   const primitives = { Switch: (props) => ({ type: 'Switch', props }) }
   const withDeps = row.factory((spec) => {
     if (spec === 'react') return react
@@ -93,13 +96,17 @@ assert.equal(plugin.inject.includes('slots'), true,
   assert.ok(registered, 'the settings tab registers once the shell declares the slot')
   const tree = registered.component({ t: (key) => key, close() {} })
   const controls = []
+  const pickers = []
   const walk = (node) => {
     if (!node || typeof node !== 'object') return
     if (node.type === primitives.Switch) controls.push(node)
+    if (node.type === 'input' && node.props && node.props.type === 'file') pickers.push(node)
     for (const child of node.children ?? []) walk(child)
   }
   walk(tree)
-  assert.equal(controls.length, 2, 'the page renders the two switches this plugin honours')
+  assert.equal(controls.length, 3, 'one switch per setting, the upload included')
+  assert.equal(pickers.length, 1, 'and one file picker for the uploaded animation')
+  assert.equal(pickers[0].props.accept, 'video/*', 'the picker asks for video files')
 }
 
 /* The whole apply must survive a table with no React: the splash, the routes and

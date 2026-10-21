@@ -1,6 +1,6 @@
 {
   "name": "dsh-opening-splash",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "DeepSeek Harness opening splash: plays the DSH software-opening animation full screen when the Web UI boots, then fades into the app (skippable, speed and frequency configurable)",
   "repository": {
     "type": "git",

@@ -150,6 +150,9 @@ console.log('the cross-origin bridge appended to the served animation')
 
   check('the shipped animation matches the standalone deliverable',
     asset === readFileSync(new URL('../../deepseek-harness-opening.html', import.meta.url), 'utf8'))
+  check('the animation margins expose the host canvas through the iframe',
+    /html, body\s*\{[^}]*background:\s*transparent/s.test(asset)
+    && /#splash\s*\{[^}]*background:\s*transparent/s.test(asset))
   check('the served document adds the bridge and identity adaptation',
     served.includes('get v() { var n = window.__DSH_OPENING_IDENTITY__;')
     && served.includes("typeof n === 'string' && n ? n : 'DEEPSEEK'")

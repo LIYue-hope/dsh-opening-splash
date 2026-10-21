@@ -6,13 +6,13 @@
 
 从 1.0.2 起，动画中的 `ID CONFIRMED : DEEPSEEK` 支持自动显示 DSH 的登录账号名称，详见下方“账号名称”。
 
-插件还会在「设置」面板左侧导航中注册一个自己的选项卡，提供双击跳过（含双击处的水波涟漪过渡）、恢复默认名字，以及一个尚未实现的“自定义开屏动画”占位项，详见下方“设置选项卡”。
+插件还会在「设置」面板左侧导航中注册一个自己的选项卡，提供双击跳过（含双击处的水波涟漪过渡）、恢复默认名字，以及上传自定义开屏动画，详见下方“设置选项卡”。
 
 ## 安装
 
-需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。账号名称功能还需要客户端模块系统、`remote.account` 和 `locale` 服务。此前在桌面端 0.2.0-rc.2 确认过播放；1.0.3 通过离线回归测试，尚未验证此次修改的实际桌面端画面。
+需要 Node.js 20 或更新版本，以及支持 DSH bundle、`webServer` 和 index 注入接口的 DeepSeek Harness。账号名称功能还需要客户端模块系统、`remote.account` 和 `locale` 服务。此前在桌面端 0.2.0-rc.2 确认过播放；1.0.4 通过离线回归测试，尚未在报告问题的 0.2.1-rc.2 设备上实测。
 
-在 DeepSeek Harness 的插件市场中选择 npm 官方源或中国大陆镜像源，输入 `dsh-opening-splash` 即可安装。已安装用户请更新到 1.0.3，然后重启 DSH。
+在 DeepSeek Harness 的插件市场中选择 npm 官方源或中国大陆镜像源，输入 `dsh-opening-splash` 即可安装。已安装用户请更新到 1.0.4，然后重启 DSH。
 
 从 npm 安装到 Windows 桌面 profile：
 
@@ -20,13 +20,13 @@
 dsh plugin --profile desktop add dsh-opening-splash
 ```
 
-镜像尚未同步时，可直接从 npm 官方 tarball 安装 1.0.3：
+镜像尚未同步时，可直接从 npm 官方 tarball 安装 1.0.4：
 
 ```powershell
-dsh plugin --profile desktop add https://registry.npmjs.org/dsh-opening-splash/-/dsh-opening-splash-1.0.3.tgz
+dsh plugin --profile desktop add https://registry.npmjs.org/dsh-opening-splash/-/dsh-opening-splash-1.0.4.tgz
 ```
 
-直装地址：[dsh-opening-splash-1.0.3.tgz](https://registry.npmjs.org/dsh-opening-splash/-/dsh-opening-splash-1.0.3.tgz)。
+直装地址：[dsh-opening-splash-1.0.4.tgz](https://registry.npmjs.org/dsh-opening-splash/-/dsh-opening-splash-1.0.4.tgz)。
 
 离线或开发时，下载或克隆仓库后，将插件目录安装到实际使用的 profile：
 
@@ -58,23 +58,53 @@ dsh plugin --profile desktop list
 
 ## 设置选项卡
 
-插件在 DSH 的「设置」模态里注册一个选项卡，位置就是设置面板左侧那列导航（`settings.section` 槽位）。侧栏底部「设置」按钮打开面板后，左栏最下方会出现「开场动画」一项，点开是本插件自己的页面。导航文字跟随界面语言（中文「开场动画」／英文 `Opening splash`）。
+插件在 DSH 的「设置」模态里注册一个选项卡，位置就是设置面板左侧那列导航（`settings.section` 槽位）。侧栏底部「设置」按钮打开面板后，左栏最下方会出现「开场动画」一项，点开是本插件自己的页面。页面文案跟随界面语言（中文／英文两套字典）。
 
-页面上目前有三个条目：
+页面上有三个条目：
 
 | 条目 | 默认 | 作用 |
 |---|---|---|
 | **双击跳过** | 关 | 在画面上任意位置双击即结束开场，并在双击处用水波涟漪过渡到界面 |
 | **恢复默认名字** | 关 | `ID CONFIRMED` 后显示 `DEEPSEEK`，而非当前登录账号名 |
-| **使用自定义开屏动画** | 关 | 占位项，尚未实现：选择器为禁用状态，标注「尚未开放」 |
+| **使用自定义开屏动画** | 关 | 上传一个视频文件作为开屏动画；上传后自动开启，可随时移除 |
+
+### 上传自定义开屏动画
+
+选择一个视频文件（`accept="video/*"`：MP4／WebM／MOV／GIF 等引擎能解码的格式）后：
+
+- **文件本体存进 IndexedDB**（数据库 `dsh-opening-splash`，对象仓库 `splash`，键 `custom`），因为视频动辄几十兆，`localStorage` 只能存几兆的字符串；只有**描述信息**（文件名、大小、类型）写进 `localStorage` 的 `dsh-opening-splash:upload`。
+- 保存成功后自动打开开关——存了却没人播的文件不是用户想要的——并立即同步给运行中的加载器。
+- 页面上会显示「已保存：文件名（大小）」和一个「移除」按钮；移除会同时清掉数据库里的文件、描述和开关。
+- 上限 200 MB（`MAX_UPLOAD_BYTES`）。超限、空文件、未选文件、浏览器拒绝写入（空间不足等）都会在页面下方以错误色显示具体原因，且不会留下半状态。
+- 浏览器没有 IndexedDB（或拒绝打开）时，页面说明原因并禁用选择器和开关，而不是给一个存不下东西的选择器。
+
+加载器在**每次播放前**读取这两个存储：开关打开且描述存在时，读取 Blob、用 `URL.createObjectURL` 生成临时地址、在覆盖层里插入一个 `<video>` 播放；读完即释放该地址（`revokeObjectURL`），不会把整个视频一直挂在内存里。
+
+上传的动画**拥有内置动画的全部功能**，因为跳过、提示、看门狗和涟漪过渡都挂在覆盖层与父窗口上，而不是挂在 iframe 内部：
+
+| 功能 | 上传动画的表现 |
+|---|---|
+| 双击跳过 + 水波涟漪 | 相同；涟漪圆心取双击坐标，遮罩孔在覆盖层上扩张 |
+| Esc 跳过 | 相同（`skippable` 为真时） |
+| 单击跳过 | 相同，需开启 `skipOnClick` |
+| 跳过提示 | 相同，需开启 `showSkipHint` |
+| 结束上报 | 以 `via=video` 上报，原因分别为 `completed`（播放到结尾）、`key`／`click`／`dblclick` |
+| 倍速 `speed` | 相同（按时长折算结束时间） |
+
+上传动画特有的行为：
+
+- 视频以**静音**方式播放（`muted` + `playsinline`）：静音是各引擎允许自动播放的前提，需要一次点击才开始的开屏不算开屏。因此上传文件的音轨不会被播放。
+- 结束由媒体自身事件驱动：`loadeddata` 按媒体时长武装结束时钟，`ended` 结束播放，`error`（无法解码等）以 `media-error` 结束，自动播放被拒（`autoplay-blocked`）也会结束——都不会留下黑屏。
+- 文件已删除但开关还开着、数据库读不到、没有 IndexedDB 时，**自动回退到内置动画**，而不是让覆盖层永远停在那里。
+- 内置动画期间使用的 `ANIMATION_DURATION_MS` 兜底时长对上传动画不适用，改用媒体自身时长。
 
 ### 开关存在哪里
 
 三个开关存在浏览器 `localStorage` 的 `dsh-opening-splash:settings` 键下，由浏览器端两半共用：设置页写入，动画加载器在每次播放前读取并与部署配置合并。因此它们是**本机浏览器的偏好**，不是部署配置——换一台机器或清空站点数据即回到默认；部署方在 `cordis.patch.yml` 里设的值仍然是基线。
 
-- 打开设置页所在页面即可生效：写入后立即调 `window.DSHOpening.setPrefs()` 推给运行中的加载器，「恢复默认名字」无需刷新即可看到效果。
+- 打开设置页所在页面即可生效：写入后立即调 `window.DSHOpening.setPrefs()` 推给运行中的加载器，「恢复默认名字」无需刷新即可看到效果；上传／移除动画在下一次页面加载时生效。
 - 存储被禁用时开关只在当前页面有效，并会打印一次失败而不中断播放。
-- 读取到的非布尔值（例如手写成 `"yes"`）会被忽略并回落到配置值。
+- 读取到的非布尔值（例如手写成 `"yes"`）会被忽略并回落到配置值；描述信息字段不完整时视为没有上传。
 
 ### 双击跳过的过渡动画
 
@@ -91,7 +121,8 @@ dsh plugin --profile desktop list
 - 动画关键帧由插件在运行期注入 `document.head`，不依赖宿主页面样式。
 - 涟漪扩散时长取 `rippleMs`（默认 1800 毫秒），两圈错开 180 毫秒；界面约在 1980 毫秒时完全显现，之后保留短暂清理缓冲。此时长独立于开场播放倍速 `speed`。
 - 引擎不支持 `mask-image` 时自动退化为普通淡出，绝不出现“永远盖着”的情况；宿主可用 `rippleReveal: false` 主动关闭该过渡，此时双击仍可结束播放，只是走淡出。
-- 跨源 iframe（桌面端）无法直接读取点击坐标，宿主在动画文档里追加的 bridge 会以 `how:"dblclick"` 上报，并附带坐标；父页面再叠加 iframe 自身的位置换算成页面坐标。坐标缺失时从视口中心展开。
+- 内置动画 iframe 不参与鼠标命中测试，双击直接落在父页面覆盖层上；桌面端即使跨源 bridge 没有送达手势消息，也能跳过。bridge 仍保留上报路径作为兼容补充。
+- 动画保持固定 16:9 比例时，上下或左右留白透出 iframe 背景；插件从 DSH 界面自身的背景读取实际颜色填充留白，不固定使用黑色或白色常量。
 - 关闭双击跳过时不注册 `dblclick` 监听（bridge 始终带监听器代码，但按开关决定是否挂载）。
 - 结束通知与淡出路径一致：`dsh:opening-complete` 在两种结束方式下都会触发，且只触发一次。
 
@@ -113,6 +144,7 @@ dsh plugin --profile desktop list
 - 通过 `ctx.slots.inject('settings.section', …)` 注册，该调用是声明感知的，因此插件与设置面板的加载先后不影响结果；点击左侧导航时该槽位才渲染页面。
 - 插件在 `package.json` 的 `dsh.client.inject` 中声明 `@deepseek-ai/dsh-client-ui-settings-general`（声明 `settings.section` 的包）和 `@deepseek-ai/dsh-client-ui-primitives`（提供开关控件）。二者缺失时只是不注册选项卡或退回原生复选框，弹窗、诊断路由和账号名称功能不受影响。
 - 页面用 `require('react').createElement` 手工构造元素，因此 `lib/client.js` 仍是无需打包的单文件；React 不可用时页面渲染为空而不会报错。
+- **字典必须是扁平的点号键**（`'customSplash.label': '…'`），不能写成嵌套对象。语言服务按 `dict[key]` 原样取值、不下钻，嵌套写法会让每个点号键都取到 `undefined`，于是一路回落到英文——界面永远显示英文而看不出报错。测试里的语言桩按真实实现取值（不做扁平化），专门守住这一点。
 - 选项卡没有自定义图标：DSH 用导航项 `id` 作图标键，未知 id 使用默认齿轮图标。
 
 ## 配置
@@ -166,7 +198,7 @@ Invoke-RestMethod http://127.0.0.1:19387/dsh-opening/health.json
 - 黑屏或异常退出：开启 `debug`，查看资源请求和 `observed.events`。
 - `identityPatched` 为 false：动画文件与宿主的名称替换锚点已不匹配，账号名不会出现；更换 `assets/splash.html` 后请一并更新 `lib/index.js` 的 `IDENTITY_LITERAL`。
 - 双击没有涟漪：确认「双击跳过」已开启（或配置里 `skipOnDoubleClick: true`），且 `rippleReveal` 不为 false；引擎不支持 `mask-image` 时会退化为淡出。
-- 桌面端双击无反应：动画文档里的 bridge 由宿主配置生成，父页面会在动画就绪时投影设置页开关；若宿主日志显示 `ready` 消息已到达，则检查 `skipOnDoubleClick` 是否真的写进了 `localStorage` 的 `dsh-opening-splash:settings`。
+- 桌面端双击无反应：先在这台设备的「开场动画」设置页确认「双击跳过」已开启；该开关保存在当前设备的浏览器资料中，不会随插件安装同步到另一设备。更新后的内置动画直接把鼠标事件交给父页面，不再依赖跨源 bridge 消息才能识别双击。
 
 `observed.lastPlayback.reason`：`completed` 表示结束信号或预计时长到达，`key` / `click` / `dblclick` / `api` 表示提前结束，`load-timeout` 表示加载超时，`capped` 表示达到指定上限。计时器结束不证明每帧均已渲染，诊断上报也不能替代视觉检查。双击结束的过渡会以 `via=skip` 记录，与按 Esc、单击的记法一致。
 
